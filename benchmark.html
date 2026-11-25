@@ -1,0 +1,1927 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+<meta charset="UTF-8" />
+<meta name="viewport" content="width=device-width, initial-scale=1.0" />
+<title>ScreenGuard Benchmark: does tailoring help?</title>
+<style>
+  :root { --ink:#0f172a; --muted:#64748b; --line:#e2e8f0; --brand:#4f46e5; --ok:#047857; --bad:#be123c; }
+  * { box-sizing: border-box; }
+  body { font-family: Inter, system-ui, -apple-system, Segoe UI, sans-serif; color: var(--ink); background:#f8fafc; margin:0; }
+  main { max-width: 860px; margin: 0 auto; padding: 24px 16px 64px; }
+  h1 { font-size: 22px; margin: 0 0 4px; }
+  h2 { font-size: 15px; margin: 0 0 10px; }
+  p, li, label, td, th { font-size: 13px; line-height: 1.5; }
+  .muted { color: var(--muted); }
+  .card { background:#fff; border:1px solid var(--line); border-radius:14px; padding:16px; margin-top:14px; }
+  .row { display:flex; gap:10px; flex-wrap:wrap; align-items:center; }
+  .grid { display:grid; grid-template-columns: repeat(auto-fit, minmax(180px,1fr)); gap:10px; }
+  input[type=text], input[type=password], input[type=number], select { width:100%; padding:8px 10px; border:1px solid var(--line); border-radius:10px; font-size:13px; background:#fff; }
+  button { padding:9px 14px; border-radius:10px; border:1px solid var(--line); background:#fff; font-weight:600; font-size:13px; cursor:pointer; }
+  button.primary { background:var(--brand); color:#fff; border-color:var(--brand); }
+  button:disabled { opacity:.45; cursor:not-allowed; }
+  .bar { height:8px; background:#e2e8f0; border-radius:99px; overflow:hidden; }
+  .bar > div { height:100%; width:0; background:var(--brand); transition: width .3s; }
+  table { width:100%; border-collapse:collapse; margin-top:8px; }
+  th, td { text-align:left; padding:6px 8px; border-bottom:1px solid var(--line); }
+  .pill { display:inline-block; padding:2px 8px; border-radius:99px; font-size:11px; font-weight:700; }
+  .good { background:#d1fae5; color:var(--ok); } .warn { background:#fef3c7; color:#92400e; } .badp { background:#ffe4e6; color:var(--bad); }
+  #log { font-family: ui-monospace, Menlo, monospace; font-size:11px; background:#0f172a; color:#cbd5e1; border-radius:10px; padding:10px; max-height:180px; overflow:auto; white-space:pre-wrap; }
+  .verdict { padding:12px; border-radius:12px; border:1px solid var(--line); background:#f8fafc; }
+</style>
+</head>
+<body>
+<main>
+  <h1>ScreenGuard Benchmark</h1>
+  <p class="muted">Does ScreenGuard's truthful tailoring make an independent AI screener more likely to advance a CV? Each CV is judged twice (original and tailored), blind and in random order, against its job description. Your API key stays in this tab, is sent only to the provider you pick, and is never saved.</p>
+
+  <div class="card">
+    <h2>1. Load the labelled test set</h2>
+    <p>Download <strong>test.csv</strong> from the <a href="https://huggingface.co/datasets/cnamuangtoun/resume-job-description-fit" target="_blank" rel="noopener">resume-job-description-fit dataset on Hugging Face</a> (Files and versions tab), then choose it here. It is read only in this browser.</p>
+    <input id="file" type="file" accept=".csv,text/csv" />
+    <p id="fileInfo" class="muted"></p>
+  </div>
+
+  <div class="card" id="settings">
+    <h2>2. Settings</h2>
+    <div class="grid">
+      <label>Judge provider
+        <select id="provider">
+          <option value="claude">Claude (Anthropic)</option>
+          <option value="openai">ChatGPT (OpenAI)</option>
+          <option value="gemini">Gemini (Google)</option>
+        </select>
+      </label>
+      <label>Judge model <input id="model" type="text" value="claude-haiku-5-5" /></label>
+      <label>Judge API key <input id="key" type="password" autocomplete="off" placeholder="Paste your key (kept in this tab only)" /></label>
+      <label>Pairs to test <input id="n" type="number" min="10" max="400" value="100" /></label>
+      <label>Random seed <input id="seed" type="number" value="42" /></label>
+      <label>Which pairs
+        <select id="sampleMode">
+          <option value="boundary">Near the line: Potential Fit + Good Fit</option>
+          <option value="weak">Weaker fit: No Fit + Potential Fit</option>
+        </select>
+      </label>
+      <label>Parallel requests <input id="conc" type="number" min="1" max="6" value="3" /></label>
+    </div>
+    <p class="row" style="margin-top:10px"><label><input id="aiTailor" type="checkbox" /> Also test AI tailoring (the app's tailoring prompt). Adds one tailoring call and one more judging call per pair.</label></p>
+    <p id="rawRow" class="row" style="display:none"><label><input id="judgeRaw" type="checkbox" /> Also judge the AI version before the truth gate (shows how much of the lift came from unsupported claims; one more call per pair).</label></p>
+    <div id="tailorCfg" class="grid" style="display:none">
+      <label>Tailoring provider
+        <select id="tProvider">
+          <option value="same">Same as judge</option>
+          <option value="claude">Claude (Anthropic)</option>
+          <option value="openai">ChatGPT (OpenAI)</option>
+          <option value="gemini">Gemini (Google)</option>
+        </select>
+      </label>
+      <label>Tailoring model <input id="tModel" type="text" placeholder="Judge model" /></label>
+      <label>Tailoring API key <input id="tKey" type="password" autocomplete="off" placeholder="Judge key" /></label>
+    </div>
+    <p class="muted">Tip: tailor with one provider and judge with another, so a model isn't grading its own writing. Settings are locked while a test runs.</p>
+    <p class="muted">Pairs are drawn from the chosen labels, at most 3 per job, half of each label. "Near the line" is the better test of whether tailoring changes a decision: CVs that are clearly wrong for the job can't be rescued truthfully. Tailoring uses no gap answers, so it can only restore structure, reorder, reword and use the job's exact terms where the CV already shows a synonym. That is the conservative case: real users add confirmed facts.</p>
+    <p id="estimate" class="muted"></p>
+  </div>
+
+  <div class="card">
+    <h2>3. Run</h2>
+    <div class="row"><button id="run" class="primary" disabled>Run benchmark</button><button id="stop" disabled>Stop</button><span id="status" class="muted"></span></div>
+    <div class="bar" style="margin-top:10px"><div id="progress"></div></div>
+    <div id="log" style="margin-top:10px"></div>
+  </div>
+
+  <div class="card" id="resultsCard" style="display:none">
+    <h2>Results</h2>
+    <div id="results"></div>
+    <div class="row" style="margin-top:10px"><button id="download">Download results CSV</button></div>
+  </div>
+</main>
+
+<script>
+// ---- Minimal state used by the shared ScreenGuard code ------------------------
+const state = { jdRoleTitle: '', jdCompany: '' };
+function escapeHtml(str) {
+  return String(str || '').replace(/&/g, '&amp;').replace(/</g, '&lt;').replace(/>/g, '&gt;').replace(/"/g, '&quot;');
+}
+
+    // A whole CV inside a JSON string often breaks (unescaped newlines, cut-off output). For models without a
+    // JSON mode, ask for the CV between tags instead.
+    function toTaggedTailoringPrompt(systemPrompt) {
+      return systemPrompt.replace(/(\d+)\. Return ONLY valid JSON[\s\S]*$/,
+        (all, n) => `${n}. Return the complete tailored CV between <tailored_cv> and </tailored_cv> tags, then 3 to 5 short notes on what changed, one per line, between <notes> and </notes> tags. Nothing else.`);
+    }
+
+    function buildTailoringPrompts(baseCvText, jdText, answers = [], notEvidenced = []) {
+      const systemPrompt = `You are an elite Career Strategist and ATS Optimization Specialist.
+Tailor the candidate's MASTER CV for the job description so it passes deterministic ATS filters, recruiter keyword searches and LLM screeners, while staying completely truthful.
+
+STRICT RULES (an automatic check compares your output with the sources and deletes anything it cannot find there):
+1. Use ONLY facts found in the MASTER CV and in CANDIDATE-CONFIRMED FACTS. Never add employers, job titles, dates, degrees, certifications, tools, technologies, programming languages, industries or regulations that are not in those two sources.
+2. Never add or change numbers: no new metrics, percentages, money figures, customer or user counts, team sizes, GPAs or years of experience. Copy every number exactly as written, with its original currency and units. Never add a currency symbol or convert units.
+3. Never upgrade a claim: "assisted" does not become "led", "familiar with" does not become "expert", and a course, exam or qualification body mentioned in the CV is not a certification unless the CV says certified.
+4. Keep every employer, job title, date and degree from the master CV. You may reorder bullets within a role, tighten wording and merge duplicates.
+5. Items under NOT EVIDENCED must not be claimed, implied or listed as skills.
+6. The skills section may list only skills and tools that appear in the master CV or the confirmed facts. If you are unsure whether something is supported, leave it out.
+7. Where the candidate's real experience matches, use the job description's exact terminology (e.g. write "stakeholder management" if they managed stakeholders). You may spell out an acronym that is already in the CV, e.g. "Voice of Customer (VoC)".
+8. Put the most job-relevant bullets first in each role. Turn confirmed facts into bullets under the role they came from, and merge confirmed results into the bullet they describe.
+9. Write a specific 2-3 line Professional Summary from real facts. No clichés such as "results-driven", "proven track record", "passionate" or "dynamic".
+10. Clean single-column plain text with standard headers (PROFESSIONAL SUMMARY, CORE SKILLS, EXPERIENCE, EDUCATION) and "- " bullets. No brackets, placeholders or notes to the candidate inside the CV.
+11. Return ONLY valid JSON matching this schema:
+{
+  "tailoredCvText": "The complete tailored CV as clean plain text.",
+  "tailoringNotes": ["3 to 5 concise notes on what changed and why."]
+}`;
+
+      const facts = answers.filter(a => !a.skipped && a.text && a.text.trim()).map(a => {
+        if (a.kind === 'impact') return `- For the bullet "${a.bulletText}", the candidate confirms this result: ${a.text.trim()}`;
+        if (a.kind === 'eligibility') return `- ${a.requirement}: ${a.text.trim()}`;
+        if (a.kind === 'scope') return `- Largest scope the candidate has owned (use it in the summary): ${a.text.trim()}`;
+        const where = a.roleLabel && a.roleLabel !== '__skills__' ? ` (from the role "${a.roleLabel}")` : ' (skills section only)';
+        return `- Evidence for "${a.requirement}"${where}: ${a.text.trim()}`;
+      });
+
+      const userPrompt = `TARGET ROLE: ${state.jdRoleTitle || 'Target Role'} ${state.jdCompany ? 'at ' + state.jdCompany : ''}
+
+JOB DESCRIPTION:
+"""
+${jdText}
+"""
+
+MASTER CV:
+"""
+${baseCvText}
+"""
+
+CANDIDATE-CONFIRMED FACTS (may be used in addition to the master CV):
+${facts.length ? facts.join('\n') : '(none)'}
+
+NOT EVIDENCED (do not claim these):
+${notEvidenced.length ? notEvidenced.map(r => '- ' + r).join('\n') : '(none)'}`;
+
+      return { systemPrompt, userPrompt };
+    }
+
+    // =========================================================================
+    // 5B. CV INTELLIGENCE: TERMS, STRUCTURE, MUST-HAVES, GAPS, TRUTH & EXPORT CHECKS
+    // =========================================================================
+    const CvIntel = (() => {
+      // "Label|alias|alias". Aliases count as evidence for the label.
+      const TAXONOMY_RAW = [
+        // Data & analytics
+        'SQL|t-sql|pl/sql|postgresql|mysql|sql server', 'Python', 'Excel|microsoft excel', 'Tableau', 'Looker|looker studio',
+        'Power BI|powerbi', 'Google Analytics', 'Snowflake', 'BigQuery', 'dbt', 'ETL', 'Data warehousing|data warehouse',
+        'Data analysis|data analytics|analysing data|analyzing data|analysed data|analyzed data', 'Dashboards|dashboard',
+        'Data visualisation|data visualization', 'A/B testing|ab testing|experimentation', 'Statistics|statistical analysis',
+        'Machine learning', 'Forecasting', 'Financial modelling|financial modeling',
+        // Product, programme & operations
+        'Product operations|product ops', 'Product management', 'Product lifecycle|product life cycle', 'Roadmaps|roadmap|roadmapping',
+        'Product discovery|discovery', 'Go-to-market|gtm|go to market',
+        'Release management|release governance|release readiness|release planning|launch readiness',
+        'Stakeholder management|stakeholder alignment|stakeholder engagement|stakeholders', 'Cross-functional|cross functional',
+        'Process improvement|process improvements|process optimisation|process optimization|continuous improvement',
+        'Workflow automation|automate|automated|automating|automation', 'Voice of Customer|voc|voice of the customer|customer feedback',
+        'Customer success', 'Customer insights', 'User research|customer research|user interviews', 'OKRs|okr|objectives and key results',
+        'KPIs|kpi|key performance indicators', 'Agile|agile delivery|scrum|kanban', 'Jira|jira administration', 'Confluence', 'Linear', 'Notion',
+        'Asana', 'Trello', 'Miro', 'Figma', 'Program management|programme management|technical program management|tpm',
+        'Project management|project manager|project delivery', 'PRINCE2', 'PMP', 'Change management', 'Risk management',
+        'Vendor management|supplier management', 'Budget management|budgeting|budget ownership', 'Onboarding', 'Documentation',
+        'Requirements gathering|gather requirements|gathered requirements|gathering requirements|business requirements',
+        'Business analysis|business analyst', 'Operations management', 'Supply chain', 'Logistics', 'Inventory management|inventory',
+        'Lean|lean six sigma|six sigma', 'Compliance', 'GDPR', 'Contract management',
+        // Sectors
+        'B2B', 'B2C', 'SaaS', 'FinTech|financial technology|payments', 'E-commerce|ecommerce', 'Retail', 'Healthcare', 'Marketplace',
+        // Engineering
+        'JavaScript', 'TypeScript', 'React|react.js|reactjs', 'Node.js|nodejs', 'Java', 'C#', 'C++', 'Golang', 'AWS|amazon web services',
+        'Azure', 'GCP|google cloud', 'Docker', 'Kubernetes|k8s', 'Terraform', 'CI/CD|continuous integration', 'Git|github|gitlab',
+        'REST APIs|rest api|apis|api', 'Microservices', 'Linux', 'DevOps', 'Test automation|automated testing',
+        'Cybersecurity|information security',
+        // Marketing & sales
+        'SEO', 'PPC|paid search|sem', 'Content marketing', 'CRM', 'Salesforce', 'HubSpot', 'Lead generation', 'Account management',
+        'Pipeline management', 'Negotiation', 'Social media',
+        // Finance & HR
+        'FP&A|financial planning and analysis', 'IFRS', 'GAAP', 'Audit|auditing', 'ACCA', 'CIMA', 'CFA', 'CPA',
+        'Reconciliations|reconciliation', 'SAP', 'Oracle', 'Xero', 'QuickBooks', 'Recruitment|recruiting|talent acquisition',
+        'Employee relations', 'Workday', 'Performance management', 'Learning and development|l&d',
+        // People
+        'People management|line management|line manager|managed a team|team leadership', 'Mentoring|mentored|coaching',
+        'PowerPoint', 'Customer service'
+      ];
+
+      const TOOLS = new Set(['Python', 'Excel', 'Tableau', 'Looker', 'Snowflake', 'BigQuery', 'Jira', 'Confluence', 'Linear', 'Notion',
+        'Asana', 'Trello', 'Miro', 'Figma', 'JavaScript', 'TypeScript', 'React', 'Java', 'Golang', 'Azure', 'Docker', 'Kubernetes',
+        'Terraform', 'Git', 'Linux', 'Salesforce', 'HubSpot', 'Oracle', 'Xero', 'QuickBooks', 'Workday', 'PowerPoint', 'Agile', 'Lean',
+        'Google Analytics', 'Power BI', 'Voice of Customer', 'SQL', 'dbt', 'Node.js', 'SAP']);
+
+      const TAXONOMY = TAXONOMY_RAW.map(entry => {
+        const parts = entry.split('|').map(s => s.trim()).filter(Boolean);
+        const label = parts[0];
+        const aliases = new Set();
+        parts.forEach(p => {
+          const a = p.toLowerCase();
+          aliases.add(a);
+          if (/[a-z]{3,}s$/.test(a) && !/(ss|as|is|us)$/.test(a)) aliases.add(a.slice(0, -1));
+        });
+        return { label, aliases: [...aliases], taxonomy: true };
+      });
+      const ALIAS_INDEX = new Map();
+      TAXONOMY.forEach(t => t.aliases.forEach(a => { if (!ALIAS_INDEX.has(a)) ALIAS_INDEX.set(a, t); }));
+
+      const BULLET_RE = /^\s*[-•*▪●◦]\s*/;
+      const EMAIL_RE = /[a-z0-9._%+-]+@[a-z0-9.-]+\.[a-z]{2,}/i;
+      const PHONE_RE = /\+?\d[\d\s\-().]{7,}\d/;
+      const MONTHS = ['jan', 'feb', 'mar', 'apr', 'may', 'jun', 'jul', 'aug', 'sep', 'oct', 'nov', 'dec'];
+      const MON = '(?:jan(?:uary)?|feb(?:ruary)?|mar(?:ch)?|apr(?:il)?|may|june?|july?|aug(?:ust)?|sep(?:t(?:ember)?)?|oct(?:ober)?|nov(?:ember)?|dec(?:ember)?)\\.?';
+      const DPT = `(?:(${MON})\\s+|(\\d{1,2})[/.])?((?:19|20)\\d{2})`;
+      const RANGE_G = new RegExp(`${DPT}\\s*(?:–|—|-|to|until|till)\\s*(?:${DPT}|(present|current|now|today|date))`, 'gi');
+      const DEGREE_CV = /\b(bsc|b\.sc|ba|b\.a|bs|beng|meng|bachelor'?s?|msc|m\.sc|ma|mba|master'?s?|phd|doctorate|llb|llm|degree)\b/i;
+      const DEGREE_JD = /\b(bachelor'?s?|degree|bsc|b\.sc|master'?s?|msc|m\.sc|mba|phd|doctorate)\b/i;
+      const ELIG_JD = /right to work|work permit|\bvisa\b|sponsorship|authori[sz]ed to work|eligib\w* to work|clearance|driving licen[cs]e|driver'?s licen[cs]e|full licen[cs]e/i;
+      const ELIG_CV = /right to work|work permit|\bvisa\b|citizen(ship)?|settled status|indefinite leave|clearance|driving licen[cs]e|driver'?s licen[cs]e|full (?:uk |clean )?licen[cs]e/i;
+      const YEARS_RE = /(\d{1,2})\s*\+?\s*(?:(?:-|–|to)\s*\d{1,2}\s*\+?\s*)?(?:years?|yrs)/i;
+      const PREF_INLINE = /\b(preferred|nice to have|bonus|ideally|desirable|a plus|an advantage|advantageous)\b/i;
+      const CLAUSE_SPLIT = /\s+(?:within|in the|in a|in an|across|including|such as|ideally)\s+|;\s*/i;
+      const REQ_H = /requirement|qualification|must[- ]have|you have|you.ll (?:need|bring|have)|you will (?:need|bring|have)|what we.re looking for|who you are|essential|about you|skills|experience required/i;
+      const PREF_H = /preferred|nice[- ]to[- ]have|bonus|desirable|desired|ideally|advantage/i;
+      const RESP_H = /responsibilit|what you.ll do|what you will do|duties|day[- ]to[- ]day|the role|key tasks|your impact/i;
+
+      const CAP_STOP = new Set(['the', 'we', 'our', 'you', 'your', 'key', 'about', 'strong', 'proven', 'own', 'build', 'partner', 'automate',
+        'senior', 'junior', 'lead', 'manager', 'team', 'role', 'company', 'responsibilities', 'requirements', 'ability', 'experience',
+        'excellent', 'good', 'great', 'hybrid', 'remote', 'office', 'london', 'uk', 'us', 'usa', 'eu', 'emea', 'apac', 'new', 'this',
+        'that', 'these', 'an', 'a', 'job', 'description', 'skills', 'knowledge', 'understanding', 'working', 'work', 'must', 'should',
+        'will', 'can', 'who', 'what', 'why', 'how', 'minimum', 'plus', 'ideal', 'candidate', 'salary', 'benefits', 'location', 'full',
+        'time', 'part', 'i', 'me', 'my', 'it', 'is', 'are', 'be', 'as', 'etc', 'present', 'current', 'jan', 'feb', 'mar', 'apr', 'may',
+        'jun', 'jul', 'aug', 'sep', 'sept', 'oct', 'nov', 'dec', 'january', 'february', 'march', 'april', 'june', 'july', 'august',
+        'september', 'october', 'november', 'december', 'email', 'phone', 'linkedin', 'mobile', 'tel', 'knowledge', 'proficiency',
+        'proficient', 'familiarity', 'gathering', 'customization', 'demonstrated', 'previous', 'collaboration', 'communication',
+        'teamwork', 'rules', 'education', 'qualifications', 'responsibilities', 'duties', 'preferred', 'required', 'desired']);
+      const JOINERS = new Set(['of', '&']);
+      const PEOPLE_TAIL = /^(managers?|engineers?|teams?|leads?|directors?|squads?|partners?|stakeholders?|leaders?|executives?|members?|staff|people|users?|customers?|clients?|specialists?|analysts?|officers?)$/i;
+
+      const IRREGULAR = { leading: 'led', building: 'built', running: 'ran', writing: 'wrote', making: 'made', setting: 'set',
+        selling: 'sold', teaching: 'taught', buying: 'bought', holding: 'held', bringing: 'brought', keeping: 'kept', meeting: 'met',
+        overseeing: 'oversaw', seeing: 'saw', giving: 'gave', taking: 'took', driving: 'drove', growing: 'grew', speaking: 'spoke',
+        thinking: 'thought', spending: 'spent', sending: 'sent', winning: 'won', cutting: 'cut', putting: 'put', getting: 'got',
+        choosing: 'chose', understanding: 'understood', paying: 'paid', saying: 'said', telling: 'told', finding: 'found',
+        leaving: 'left', beginning: 'began', drawing: 'drew', rising: 'rose', shutting: 'shut', splitting: 'split' };
+      const NON_VERB_ING = new Set(['engineering', 'accounting', 'pricing', 'banking', 'licensing', 'catering', 'manufacturing',
+        'advertising', 'housekeeping', 'something', 'anything', 'everything', 'nothing', 'during', 'evening', 'morning', 'clothing',
+        'funding', 'offering', 'briefing', 'including', 'following', 'according', 'regarding', 'concerning', 'pending', 'existing',
+        'outstanding', 'ongoing', 'upcoming', 'incoming', 'outgoing', 'leading-edge', 'cutting-edge']);
+
+      const regexCache = new Map();
+
+      function normalize(s) {
+        return String(s || '').replace(/\r\n?/g, '\n').replace(/ /g, ' ').replace(/[‘’]/g, "'").replace(/[“”]/g, '"');
+      }
+      function squash(s) { return normalize(s).toLowerCase().replace(/\s+/g, ' ').trim(); }
+      function hash(str) {
+        let h = 5381;
+        for (let i = 0; i < str.length; i++) h = ((h << 5) + h + str.charCodeAt(i)) | 0;
+        return (h >>> 0).toString(36);
+      }
+      function cap(s) { return s ? s.charAt(0).toUpperCase() + s.slice(1) : s; }
+      function truncate(s, n) { return s.length > n ? s.slice(0, n - 1).trim() + '…' : s; }
+      function escRe(s) { return s.replace(/[.*+?^${}()|[\]\\]/g, '\\$&'); }
+
+      function aliasRegex(alias) {
+        let re = regexCache.get(alias);
+        if (!re) {
+          const esc = escRe(alias).replace(/\s+/g, '[\\s\\-]+');
+          const plural = /s$/.test(alias) ? '' : '(?:s|es)?';
+          re = new RegExp(`(^|[^a-z0-9+#])(${esc})${plural}(?![a-z0-9+#])`, 'i');
+          regexCache.set(alias, re);
+        }
+        return re;
+      }
+      function findTerm(text, term) {
+        for (const alias of term.aliases) {
+          const m = aliasRegex(alias).exec(text);
+          if (m) return { found: true, index: m.index + m[1].length, length: m[2].length };
+        }
+        return { found: false, index: -1, length: 0 };
+      }
+      function lineAt(text, index) {
+        const start = text.lastIndexOf('\n', index - 1) + 1;
+        const end = text.indexOf('\n', index);
+        return text.slice(start, end === -1 ? undefined : end).trim();
+      }
+      function isProper(label) { return /[A-Z]/.test(label.slice(1)) || /\d/.test(label) || TOOLS.has(label); }
+      function inSentence(label) { return isProper(label) ? label : label.charAt(0).toLowerCase() + label.slice(1); }
+      function joinList(items) {
+        if (items.length <= 1) return items.join('');
+        return `${items.slice(0, -1).join(', ')} and ${items[items.length - 1]}`;
+      }
+
+      // ---- Term extraction ----------------------------------------------
+      function extractCapTerms(line) {
+        const out = [];
+        const t = normalize(line).trim();
+        if (!t) return out;
+        const letters = t.replace(/[^A-Za-z]/g, '');
+        if (letters.length >= 3 && t === t.toUpperCase() && !/\d/.test(t)) return out; // section header
+        const re = /[A-Za-z0-9][A-Za-z0-9+#&'.-]*/g;
+        let m; let prevRaw = ''; let prevEnd = 0; let first = true;
+        let seq = []; let pendingJoiner = null;
+        const flush = () => {
+          let words = seq.slice();
+          while (words.length && CAP_STOP.has(words[0].toLowerCase())) words.shift();
+          while (words.length && (CAP_STOP.has(words[words.length - 1].toLowerCase()) || JOINERS.has(words[words.length - 1].toLowerCase()))) words.pop();
+          if (words.length && words.length <= 4 && !PEOPLE_TAIL.test(words[words.length - 1]) && words.join('').length >= 2) {
+            out.push(words.join(' '));
+          }
+          seq = []; pendingJoiner = null;
+        };
+        while ((m = re.exec(t))) {
+          const raw = m[0];
+          const w = raw.replace(/[.,;:!?'")\]/-]+$/, '');
+          const gap = t.slice(prevEnd, m.index);
+          const sentenceStart = first || /[.!?]$/.test(prevRaw) && !/^(e\.g|i\.e|etc|vs|inc|ltd|co)\.?$/i.test(prevRaw);
+          if (/[,;|/()\[\]•]/.test(gap) || /[,;:]$/.test(prevRaw)) flush();
+          const isAcr = (w.match(/[A-Z]/g) || []).length >= 2 || /^[A-Z][A-Za-z]*\d/.test(w);
+          const isCap = /^[A-Z]/.test(w);
+          if (w && (isAcr || (isCap && !sentenceStart))) {
+            if (pendingJoiner && seq.length) seq.push(pendingJoiner);
+            pendingJoiner = null;
+            seq.push(w);
+          } else if (seq.length && JOINERS.has(w.toLowerCase()) && !pendingJoiner) {
+            pendingJoiner = w;
+          } else {
+            flush();
+          }
+          if (/[.!?]$/.test(raw) && !/^(e\.g|i\.e|etc|vs)\.?$/i.test(raw)) flush();
+          prevRaw = raw; prevEnd = m.index + raw.length; first = false;
+        }
+        flush();
+        return out.filter(x => !/^\d+$/.test(x));
+      }
+
+      function taxonomyIn(text) {
+        const t = normalize(text);
+        const out = [];
+        TAXONOMY.forEach(term => { const r = findTerm(t, term); if (r.found) out.push({ ...term, pos: r.index }); });
+        return out.sort((a, b) => a.pos - b.pos);
+      }
+
+      function termsIn(text) {
+        const t = normalize(text);
+        const out = taxonomyIn(t);
+        const seen = new Set(out.map(x => x.label.toLowerCase()));
+        t.split('\n').forEach(line => extractCapTerms(line).forEach(label => {
+          const lower = label.toLowerCase();
+          const term = ALIAS_INDEX.get(lower) || { label, aliases: [lower], taxonomy: false };
+          const key = term.label.toLowerCase();
+          if (seen.has(key)) return;
+          seen.add(key);
+          out.push({ ...term, pos: Math.max(0, t.indexOf(label)) });
+        }));
+        const taxWords = new Set(out.filter(x => x.taxonomy).flatMap(x => x.aliases).flatMap(a => a.split(/[\s-]+/)));
+        return out
+          .filter(x => x.taxonomy || !x.label.toLowerCase().split(/\s+/).every(w => taxWords.has(w)))
+          .sort((a, b) => a.pos - b.pos);
+      }
+
+      function guessCompany(firstLine) {
+        const parts = normalize(firstLine).split(/\s+[—–|-]\s+|\s+at\s+|\s*\|\s*/);
+        return parts.length > 1 ? parts[1].replace(/\(.*?\)/g, '').trim() : '';
+      }
+
+      function classifyJdLines(lines) {
+        let section = 'other';
+        return lines.map(raw => {
+          const t = raw.trim();
+          if (!t) return section;
+          const isBullet = BULLET_RE.test(t);
+          const looksHeading = !isBullet && (t.endsWith(':') || (t.length < 60 && !/[.]$/.test(t) && t.split(/\s+/).length <= 7));
+          if (looksHeading) {
+            if (/^about\b/i.test(t)) { section = 'other'; return 'heading'; }
+            if (PREF_H.test(t)) { section = 'preferred'; return 'heading'; }
+            if (REQ_H.test(t)) { section = 'required'; return 'heading'; }
+            if (RESP_H.test(t)) { section = 'responsibilities'; return 'heading'; }
+            if (t.endsWith(':')) { section = 'other'; return 'heading'; }
+          }
+          return section;
+        });
+      }
+
+      function extractJdTerms(jdText, companyName = '') {
+        const text = prepareJd(jdText || '');
+        const lines = text.split('\n');
+        const sections = classifyJdLines(lines);
+        const company = (companyName || guessCompany(lines[0] || '')).toLowerCase().trim();
+        const capSource = lines
+          .filter((l, i) => i > 0 && (BULLET_RE.test(l) || ['required', 'preferred', 'responsibilities'].includes(sections[i])))
+          .join('\n');
+        const all = [...taxonomyIn(text), ...termsIn(capSource).filter(t => !t.taxonomy)];
+        const seen = new Set();
+        const out = [];
+        all.forEach(t => {
+          const key = t.label.toLowerCase();
+          if (seen.has(key)) return;
+          if (!t.taxonomy && company && (company.includes(key) || key.includes(company))) return;
+          seen.add(key);
+          out.push(t);
+        });
+        return out;
+      }
+
+      // ---- CV structure -------------------------------------------------
+      function headingType(t) {
+        if (/education|academic/i.test(t)) return 'education';
+        if (/^(core|key|summary of) qualifications|highlights|competenc|skill|technolog|tools|expertise/i.test(t)) return 'skills';
+        if (/qualification/i.test(t)) return 'education';
+        if (/experience|employment|work history|career history|professional background/i.test(t)) return 'experience';
+        if (/summary|profile|objective|about me|career overview/i.test(t)) return 'summary';
+        if (/certif|licen/i.test(t)) return 'certs';
+        return 'other';
+      }
+      function isHeadingLine(t) {
+        if (!t || BULLET_RE.test(t)) return false;
+        if (new RegExp(RANGE_G.source, 'i').test(t)) return false;
+        const letters = t.replace(/[^A-Za-z]/g, '');
+        if (letters.length >= 3 && t === t.toUpperCase() && t.length <= 40 && !EMAIL_RE.test(t) && !/\d/.test(t)) return true;
+        return /^(professional\s+|career\s+|executive\s+)?(summary|profile|overview|objective|experience|work experience|professional experience|volunteer experience|employment( history)?|work history|education( and training)?|skills|core skills|key skills|technical skills|skill highlights|highlights|qualifications|core qualifications|core competencies|competencies|accomplishments|certifications?|licenses|projects|achievements|awards|publications|affiliations|additional information|languages|interests)\s*:?$/i.test(t);
+      }
+      function toMonths(mon, num, year) {
+        const y = parseInt(year, 10);
+        let m = 0;
+        if (mon) m = Math.max(0, MONTHS.indexOf(mon.slice(0, 3).toLowerCase()));
+        else if (num) m = Math.min(11, Math.max(0, parseInt(num, 10) - 1));
+        return y * 12 + m;
+      }
+      function matchRanges(str) {
+        const now = new Date();
+        const nowM = now.getFullYear() * 12 + now.getMonth();
+        return [...str.matchAll(RANGE_G)].map(m => ({
+          start: toMonths(m[1], m[2], m[3]),
+          end: m[7] ? nowM : toMonths(m[4], m[5], m[6]),
+          startYear: parseInt(m[3], 10),
+          present: Boolean(m[7]),
+          startHasMonth: Boolean(m[1] || m[2]),
+          endHasMonth: Boolean(m[4] || m[5]),
+          startKind: m[1] ? 'month' : m[2] ? 'numeric' : 'year',
+          endKind: m[7] ? null : m[4] ? 'month' : m[5] ? 'numeric' : 'year',
+          raw: m[0]
+        }));
+      }
+
+      function parseCvStructure(text) {
+        const lines = normalize(text).split('\n');
+        let section = 'top';
+        const info = lines.map(raw => {
+          const t = raw.trim();
+          if (isHeadingLine(t)) { section = headingType(t); return { raw, t, heading: true, section }; }
+          return { raw, t, heading: false, section };
+        });
+        const roles = [];
+        info.forEach((l, i) => {
+          if (l.heading || !l.t || ['education', 'skills', 'summary', 'certs'].includes(l.section)) return;
+          if (BULLET_RE.test(l.t)) return;
+          const ranges = matchRanges(l.t);
+          if (!ranges.length) return;
+          if (DEGREE_CV.test(l.t) || /\b(university|college|school|academy)\b/i.test(l.t)) return;
+          let label = l.t;
+          let labelIndex = i;
+          if (l.t.replace(RANGE_G, '').replace(/[^A-Za-z]/g, '').length < 4) {
+            for (let k = i - 1; k >= 0; k--) {
+              if (info[k].t) {
+                if (!info[k].heading && !BULLET_RE.test(info[k].t)) { label = `${info[k].t} ${l.t}`; labelIndex = k; }
+                break;
+              }
+            }
+          }
+          roles.push({ lineIndex: i, labelIndex, label, ranges });
+        });
+        roles.forEach((r, idx) => {
+          const end = idx + 1 < roles.length ? roles[idx + 1].labelIndex : info.length;
+          r.bulletIdx = [];
+          for (let k = r.lineIndex + 1; k < end; k++) {
+            if (info[k].heading) break;
+            if (BULLET_RE.test(info[k].t)) r.bulletIdx.push(k);
+          }
+        });
+        return { lines, info, roles };
+      }
+
+      function computeCvYears(text) {
+        const s = parseCvStructure(prepareText(text));
+        const intervals = s.roles.flatMap(r => r.ranges).filter(x => x.end > x.start).sort((a, b) => a.start - b.start);
+        let total = 0; let curS = null; let curE = null;
+        intervals.forEach(iv => {
+          if (curS === null) { curS = iv.start; curE = iv.end; return; }
+          if (iv.start <= curE) curE = Math.max(curE, iv.end);
+          else { total += curE - curS; curS = iv.start; curE = iv.end; }
+        });
+        if (curS !== null) total += curE - curS;
+        const earliest = intervals.length ? Math.min(...intervals.map(i => i.startYear)) : null;
+        return { years: total / 12, earliest, hasRanges: intervals.length > 0 };
+      }
+
+      function impactBullets(text) {
+        const s = parseCvStructure(text);
+        let idx = s.roles.flatMap(r => r.bulletIdx);
+        if (!idx.length) {
+          idx = s.info.map((l, i) => (BULLET_RE.test(l.t) && !['education', 'skills'].includes(l.section) ? i : -1)).filter(i => i >= 0);
+        }
+        const seen = new Set();
+        return idx.map(i => s.lines[i].trim())
+          .filter(l => l.replace(BULLET_RE, '').length > 30 && !/\d/.test(l))
+          .filter(l => (seen.has(l) ? false : (seen.add(l), true)))
+          .slice(0, 4);
+      }
+
+      // ---- Rewrites -----------------------------------------------------
+      function toPast(w) {
+        const lw = w.toLowerCase();
+        if (IRREGULAR[lw]) return IRREGULAR[lw];
+        const stem = lw.slice(0, -3);
+        if (/ee$/.test(stem)) return stem + 'd';
+        if (/[^aeiou]y$/.test(stem)) return stem.slice(0, -1) + 'ied';
+        return stem + 'ed';
+      }
+      function rewritePassive(phrase) {
+        const m = /^(responsible for|duties included|helped with|assisted (?:in|with))\s+(.*)$/i.exec(String(phrase).trim());
+        if (!m) return phrase;
+        const lead = m[1].toLowerCase();
+        const rest = m[2];
+        const firstWord = (rest.match(/^[A-Za-z]+/) || [''])[0];
+        const isGerund = /ing$/i.test(firstWord) && firstWord.length > 4 && !NON_VERB_ING.has(firstWord.toLowerCase());
+        if (lead === 'responsible for' || lead === 'duties included') {
+          if (isGerund) {
+            let out = toPast(firstWord) + rest.slice(firstWord.length);
+            out = out.replace(/(,\s*|\s+and\s+)([a-z]+ing)\b/gi, (all, sep, g) =>
+              NON_VERB_ING.has(g.toLowerCase()) || g.length <= 4 ? all : sep + toPast(g));
+            return cap(out);
+          }
+          return (lead === 'responsible for' ? 'Owned ' : 'Handled ') + rest;
+        }
+        // "Helped with" / "Assisted in": name the work without inflating your level of ownership
+        return 'Contributed to ' + rest;
+      }
+      function rewritePassiveInText(text) {
+        let changed = 0;
+        const out = normalize(text).split('\n').map(line => line.replace(
+          /^(\s*(?:[-•*▪●◦]\s*)?)(responsible for|duties included|helped with|assisted (?:in|with))\s+(.+)$/i,
+          (all, pre, lead, rest) => { changed++; return pre + rewritePassive(`${lead} ${rest}`); }
+        )).join('\n');
+        return { text: out, changed };
+      }
+
+      function mergeImpact(line, answer) {
+        const hadPeriod = /\.\s*$/.test(line);
+        const base = line.replace(/[.\s]+$/, '');
+        let add = String(answer).trim().replace(/\s*\n\s*/g, ' ').replace(/^[,;:\s-]+/, '').replace(/[.\s]+$/, '');
+        if (/^[A-Z][a-z]/.test(add) && !/^[A-Z][a-z]+\s+[A-Z]/.test(add)) add = add.charAt(0).toLowerCase() + add.slice(1);
+        return `${base}, ${add}${hadPeriod ? '.' : ''}`;
+      }
+
+      function insertBeforeFirstSection(text, block) {
+        const s = parseCvStructure(text);
+        const idx = s.info.findIndex(l => l.heading && l.section !== 'other');
+        if (idx === -1) return `${block.trim()}\n\n${normalize(text).trim()}`;
+        const lines = s.lines.slice();
+        lines.splice(idx, 0, ...block.trim().split('\n'), '');
+        return lines.join('\n');
+      }
+      function insertAfterName(text, line) {
+        const lines = normalize(text).split('\n');
+        const first = lines.findIndex(l => l.trim());
+        const looksLikeName = first !== -1 && !/\d|@/.test(lines[first]) && lines[first].trim().split(/\s+/).length <= 5;
+        if (looksLikeName) lines.splice(first + 1, 0, line.trim());
+        else lines.unshift(line.trim());
+        return lines.join('\n');
+      }
+      function addToContactLine(text, addition) {
+        const lines = normalize(text).split('\n');
+        const idx = lines.findIndex(l => EMAIL_RE.test(l) || PHONE_RE.test(l));
+        if (idx !== -1 && addition.length <= 70 && !squash(lines[idx]).includes(squash(addition))) {
+          lines[idx] = `${lines[idx].replace(/\s+$/, '')} | ${addition}`;
+          return lines.join('\n');
+        }
+        return insertAfterName(text, addition);
+      }
+      function insertBulletUnderRole(text, roleLabel, answer) {
+        const s = parseCvStructure(text);
+        const want = squash(roleLabel);
+        const role = s.roles.find(r => squash(r.label) === want) || s.roles.find(r => squash(r.label).startsWith(want.slice(0, 25)));
+        if (!role) return { ok: false, text };
+        const lines = s.lines.slice();
+        const existing = role.bulletIdx.map(i => lines[i]);
+        const prefix = existing.length ? (existing[0].match(BULLET_RE) || ['- '])[0] : '- ';
+        const periods = existing.filter(l => /\.\s*$/.test(l)).length;
+        const usePeriod = existing.length ? periods >= existing.length / 2 : true;
+        const body = cap(String(answer).trim().replace(/\s*\n\s*/g, ' ').replace(/^[-•*]\s*/, '').replace(/[.\s]+$/, ''));
+        const at = role.bulletIdx.length ? role.bulletIdx[role.bulletIdx.length - 1] + 1 : role.lineIndex + 1;
+        lines.splice(at, 0, `${prefix}${body}${usePeriod ? '.' : ''}`);
+        return { ok: true, text: lines.join('\n') };
+      }
+      function addSkills(text, labels, literal = false) {
+        const s = parseCvStructure(text);
+        const lines = s.lines.slice();
+        const hIdx = s.info.findIndex(l => l.heading && l.section === 'skills');
+        const wanted = [...new Set(labels)];
+        if (hIdx === -1) {
+          if (!wanted.length) return { text, added: [] };
+          return { text: `${normalize(text).trim()}\n\nCORE SKILLS\n${wanted.join(' | ')}`, added: wanted };
+        }
+        let cIdx = -1;
+        for (let k = hIdx + 1; k < lines.length; k++) {
+          if (s.info[k].heading) break;
+          if (lines[k].trim()) { cIdx = k; break; }
+        }
+        if (cIdx === -1) {
+          lines.splice(hIdx + 1, 0, wanted.join(' | '));
+          return { text: lines.join('\n'), added: wanted };
+        }
+        const sectionText = lines.slice(hIdx + 1).join('\n');
+        const added = wanted.filter(l => !findTerm(sectionText, (!literal && ALIAS_INDEX.get(l.toLowerCase())) || { aliases: [l.toLowerCase()] }).found);
+        if (!added.length) return { text, added: [] };
+        const sep = lines[cIdx].includes('|') ? ' | ' : lines[cIdx].includes('•') ? ' • ' : ', ';
+        lines[cIdx] = `${lines[cIdx].replace(/[\s.]+$/, '')}${sep}${added.join(sep)}`;
+        return { text: lines.join('\n'), added };
+      }
+      function reorderBulletsByRelevance(text, jdTerms) {
+        const s = parseCvStructure(text);
+        const lines = s.lines.slice();
+        let rolesChanged = 0;
+        s.roles.forEach(r => {
+          const idx = r.bulletIdx;
+          if (idx.length < 2) return;
+          const contiguous = idx.every((v, i) => i === 0 || v === idx[i - 1] + 1);
+          if (!contiguous) return;
+          const scored = idx.map((li, order) => ({ line: lines[li], order, score: jdTerms.filter(t => findTerm(lines[li], t).found).length }));
+          const sorted = scored.slice().sort((a, b) => b.score - a.score || a.order - b.order);
+          if (sorted.some((x, i) => x.order !== scored[i].order)) {
+            rolesChanged++;
+            sorted.forEach((x, i) => { lines[idx[i]] = x.line; });
+          }
+        });
+        return { text: lines.join('\n'), rolesChanged };
+      }
+      function buildFactualSummary(text, jdTerms) {
+        const s = parseCvStructure(text);
+        const role0 = s.roles[0];
+        if (!role0) return '';
+        const title = role0.label.replace(RANGE_G, ' ').replace(/\(\s*\)/g, ' ')
+          .split(/\s+[—–|-]\s+|\s+at\s+|\s*,\s+|\s*\|\s*|\s*\(/)[0].trim();
+        if (!title || title.length > 60 || /\d/.test(title)) return '';
+        const years = Math.floor(computeCvYears(text).years + 0.0001);
+        const pool = (jdTerms && jdTerms.length ? jdTerms : taxonomyIn(text)).filter(t => findTerm(text, t).found);
+        const evid = pool.filter(t => t.label.toLowerCase() !== title.toLowerCase()).slice(0, 4).map(t => inSentence(t.label));
+        const exp = years >= 1 ? `${years}+ years of experience` : 'hands-on experience';
+        return `${title} with ${exp}${evid.length ? ` across ${joinList(evid)}` : ''}.`;
+      }
+
+      // ---- Must-have requirements ---------------------------------------
+      function extractRequirements(jdText, cvText) {
+        const jd = prepareJd(jdText || '');
+        const cv = prepareText(cvText || '');
+        // Long paragraphs become sentences so each requirement is checked on its own
+        const lines = jd.split('\n').flatMap(l => (l.length > 220 ? l.split(/(?<=[.;!?])\s+(?=[A-Z•\-])/) : [l]));
+        const sections = classifyJdLines(lines);
+        const cvYears = computeCvYears(cv);
+        const items = [];
+        const byKey = new Map();
+        const push = (item) => {
+          const key = item.requirement.toLowerCase();
+          if (byKey.has(key)) { if (item.type === 'required') byKey.get(key).type = 'required'; return; }
+          const full = { id: 'req-' + hash(key), terms: [], evidence: '', note: '', ...item };
+          byKey.set(key, full);
+          items.push(full);
+        };
+        const evidenceFor = (term) => { const r = findTerm(cv, term); return r.found ? lineAt(cv, r.index) : ''; };
+        const termItem = (t, type) => {
+          const ev = evidenceFor(t);
+          return { requirement: t.label, type, category: TOOLS.has(t.label) ? 'Tool' : 'Skill', status: ev ? 'met' : 'missing', evidence: ev, terms: [t.label] };
+        };
+        const hasReqSection = sections.some(s => s === 'required' || s === 'preferred');
+        const hasBullets = lines.some(l => BULLET_RE.test(l));
+        const REQ_CUE = /\b(experience (?:in|with)|required|must|proficien\w*|knowledge of|degree|certif\w*|\d+\+?\s*years|ability to|familiar\w* with|working knowledge|expertise in|skilled in)\b/i;
+
+        lines.forEach((raw, i) => {
+          if (i === 0 || sections[i] === 'heading') return;
+          const line = raw.trim().replace(BULLET_RE, '');
+          if (!line) return;
+          let sec = sections[i];
+          let fallbackLine = false;
+          if (!hasReqSection && BULLET_RE.test(raw) && sec !== 'responsibilities') {
+            sec = /\b(must|required|essential|need)\b/i.test(line) ? 'required' : 'preferred';
+          } else if (!hasReqSection && !hasBullets && REQ_CUE.test(line)) {
+            // No headings or bullets (flattened text): fall back to sentences that read like requirements,
+            // and only trust known skills/tools or acronyms from them (Title Case prose is too noisy)
+            sec = /\b(must|required|essential|minimum)\b/i.test(line) ? 'required' : 'preferred';
+            fallbackLine = true;
+          }
+          if (sec === 'responsibilities') {
+            termsIn(line).filter(t => t.taxonomy || /[A-Z].*[A-Z]/.test(t.label)).forEach(t => push(termItem(t, 'preferred')));
+            return;
+          }
+          if (sec !== 'required' && sec !== 'preferred') return;
+          const type = sec === 'preferred' || PREF_INLINE.test(line) ? 'preferred' : 'required';
+
+          if (ELIG_JD.test(line)) {
+            const at = cv.search(ELIG_CV);
+            push({ requirement: truncate(line.replace(/[.\s]+$/, ''), 90), type, category: 'Eligibility', status: at !== -1 ? 'met' : 'unknown',
+              evidence: at !== -1 ? lineAt(cv, at) : '', note: at !== -1 ? '' : 'Not stated on your CV. Employers often filter on this first.' });
+            return;
+          }
+          const ym = line.match(YEARS_RE);
+          if (ym) {
+            const need = parseInt(ym[1], 10);
+            const have = cvYears.years;
+            const status = !cvYears.hasRanges ? 'unknown' : have >= need ? 'met' : have >= need - 1 ? 'partial' : 'missing';
+            push({ requirement: `${need}+ years' relevant experience`, type, category: 'Experience', status, evidenceComputed: true,
+              evidence: cvYears.hasRanges ? `Your dated roles span about ${Math.floor(have + 0.0001)} years (since ${cvYears.earliest}).` : '',
+              note: cvYears.hasRanges ? 'Only relevant roles count. Make sure they are clearly dated.' : 'No date ranges found on your CV, so an ATS cannot calculate your experience.' });
+          }
+          if (DEGREE_JD.test(line)) {
+            const at = cv.search(DEGREE_CV);
+            push({ requirement: `Degree: ${truncate(line.replace(/[.\s]+$/, ''), 70)}`, type, category: 'Education',
+              status: at !== -1 ? 'met' : 'missing', evidence: at !== -1 ? lineAt(cv, at) : '' });
+          }
+          line.split(CLAUSE_SPLIT).map(c => c.trim()).filter(Boolean).forEach(clause => {
+            const ts = termsIn(clause).filter(t => !fallbackLine || t.taxonomy || /[A-Z].*[A-Z]/.test(t.label));
+            if (!ts.length) return;
+            if (ts.length >= 2 && /\bor\b|\//i.test(clause)) {
+              const hits = ts.filter(t => findTerm(cv, t).found);
+              push({ requirement: ts.map(t => t.label).join(' / '), type, category: 'Experience', anyOf: true,
+                status: hits.length ? 'met' : 'missing', evidence: hits.length ? evidenceFor(hits[0]) : '',
+                note: hits.length ? `Matched: ${hits.map(h => h.label).join(', ')}` : 'Any one of these would count.',
+                terms: ts.map(t => t.label) });
+            } else {
+              ts.forEach(t => push(termItem(t, type)));
+            }
+          });
+        });
+
+        // Location from the title line or a "Location:" line
+        const head = lines.slice(0, 4).join('\n');
+        const locMatch = head.match(/^\s*location\s*[:\-]\s*(.+)$/im) || (lines[0] || '').match(/\(([^)]+)\)/);
+        let locationItem = null;
+        if (locMatch) {
+          const locStr = locMatch[1].trim();
+          const parts = locStr.split(/[\/|,]/).map(p => p.trim())
+            .filter(p => p && !/^(hybrid|remote|on-?site|office|full[- ]time|part[- ]time|permanent|contract|flexible|m|f|d)$/i.test(p));
+          const city = parts[0];
+          if (city && city.length >= 3 && /[A-Za-z]/.test(city) && city.length < 30) {
+            const r = aliasRegex(city.toLowerCase()).exec(cv);
+            const at = r ? r.index + r[1].length : -1;
+            locationItem = { id: 'req-' + hash('location:' + locStr.toLowerCase()), requirement: `Location: ${locStr}`, type: 'required',
+              category: 'Eligibility', status: at !== -1 ? 'met' : 'unknown', evidence: at !== -1 ? lineAt(cv, at) : '', terms: [],
+              note: at !== -1 ? '' : 'Put your city and country on your contact line so location filters find you.' };
+          }
+        }
+        const required = items.filter(i => i.type === 'required').slice(0, 12);
+        const preferred = items.filter(i => i.type !== 'required').slice(0, 10);
+        return [...(locationItem ? [locationItem] : []), ...required, ...preferred];
+      }
+
+      // ---- Exact wording (synonym matches) -------------------------------
+      function matchedAliases(text, term) {
+        const out = [];
+        term.aliases.forEach(a => {
+          const m = aliasRegex(a).exec(text);
+          if (m) out.push({ alias: a, text: m[2], index: m.index + m[1].length });
+        });
+        return out;
+      }
+      function wordingGaps(jdText, cvText) {
+        const jd = prepareJd(jdText || '');
+        const cv = prepareText(cvText || '');
+        if (!jd.trim() || !cv.trim()) return [];
+        const gaps = [];
+        taxonomyIn(jd).forEach(term => {
+          const inJd = matchedAliases(jd, term);
+          const inCv = matchedAliases(cv, term);
+          if (!inJd.length || !inCv.length) return;
+          const jdSet = new Set(inJd.map(x => x.alias));
+          if (inCv.some(x => jdSet.has(x.alias))) return;
+          const best = inJd.find(x => x.alias === term.label.toLowerCase()) || inJd.slice().sort((a, b) => b.alias.length - a.alias.length)[0];
+          gaps.push({ label: term.label, jdPhrase: best.text, cvPhrase: inCv[0].text, cvLine: lineAt(cv, inCv[0].index) });
+        });
+        return gaps;
+      }
+
+      // ---- Title & seniority ---------------------------------------------
+      const LEVEL_NAMES = ['Entry level', 'Junior', 'Mid-level', 'Senior / manager', 'Senior manager / principal', 'Director / executive'];
+      const FUNC_STOP = new Set(['senior', 'sr', 'junior', 'jr', 'lead', 'head', 'of', 'principal', 'staff', 'manager', 'specialist',
+        'analyst', 'associate', 'assistant', 'coordinator', 'director', 'vp', 'vice', 'president', 'chief', 'officer', 'executive',
+        'intern', 'graduate', 'trainee', 'the', 'and', 'i', 'ii', 'iii', 'team', 'group', 'global', 'regional']);
+      function levelOf(title) {
+        const t = ` ${String(title).toLowerCase()} `;
+        if (/\b(director|vp|vice president|chief|ceo|cto|cfo|coo|cmo|cpo|president)\b/.test(t)) return 5;
+        if (/\b(head of|principal)\b/.test(t) || /\bstaff (engineer|scientist|designer|developer)\b/.test(t) ||
+            /\b(senior|sr\.?)\s+(?:[a-z&/-]+\s+){0,3}(manager|lead)\b/.test(t) || /\bgroup (manager|lead)\b/.test(t)) return 4;
+        if (/\b(intern|internship|graduate|apprentice|trainee|placement)\b/.test(t)) return 0;
+        if (/\b(associate|assistant)\b/.test(t) && /\bmanager\b/.test(t)) return 2;
+        if (/\b(senior|sr\.?|manager|lead)\b/.test(t)) return 3;
+        if (/\b(junior|jr\.?|assistant|associate|coordinator|administrator)\b/.test(t)) return 1;
+        return 2;
+      }
+      function titleFromLabel(label) {
+        const t = String(label).replace(RANGE_G, ' ').replace(/\(\s*\)/g, ' ')
+          .split(/\s+[—–|-]\s+|\s+at\s+|\s*,\s+|\s*\|\s*|\s*\(/)[0].trim();
+        return t && t.length <= 60 && !/\d/.test(t) ? t : '';
+      }
+      function latestRole(text) {
+        const s = parseCvStructure(text);
+        if (!s.roles.length) return null;
+        return s.roles.slice().sort((a, b) => Math.max(...b.ranges.map(r => r.end)) - Math.max(...a.ranges.map(r => r.end)))[0];
+      }
+      function jdTitleFromText(jdText) {
+        const first = normalize(jdText || '').split('\n').map(l => l.trim()).find(Boolean) || '';
+        const t = first.split(/\s+[—–|-]\s+|\s+at\s+|\s*\(|\s*\|/)[0].trim();
+        return t && t.length <= 70 && !/[:.]$/.test(t) && t.split(/\s+/).length <= 8 ? t : '';
+      }
+      function titleCheck(jdTitle, cvText) {
+        const role = latestRole(prepareText(cvText));
+        const cvTitle = role ? titleFromLabel(role.label) : '';
+        const jt = String(jdTitle || '').trim();
+        if (!jt || !cvTitle) return null;
+        const jl = levelOf(jt);
+        const cl = levelOf(cvTitle);
+        const gap = jl - cl;
+        const words = x => new Set(x.toLowerCase().split(/[^a-z0-9+#]+/).filter(w => w.length > 1 && !FUNC_STOP.has(w)));
+        const jw = words(jt);
+        const cw = words(cvTitle);
+        const overlap = [...jw].filter(w => cw.has(w));
+        const messages = [];
+        const tips = [];
+        let severity = 'ok';
+        if (gap >= 2) {
+          severity = 'warning';
+          messages.push(`This is a ${gap}-level step up (${LEVEL_NAMES[cl]} to ${LEVEL_NAMES[jl]}). Screeners often mark that down unless the CV shows scope at the target level.`);
+        } else if (gap === 1) {
+          severity = 'info';
+          messages.push('A one-level step up, which is normal. Make sure your summary shows the scope the job expects.');
+        } else if (gap <= -2) {
+          severity = 'info';
+          messages.push('Your latest title is more senior than this role. Some screeners read that as overqualification or a flight risk, so say in your summary why this role fits.');
+        } else {
+          messages.push('Your latest title is at about the same level as this role.');
+        }
+        if (jw.size && !overlap.length) {
+          severity = 'warning';
+          messages.push(`Your latest title shares no function words with "${jt}". Recruiters search by title, so name the matching function in your summary if it's accurate.`);
+        }
+        if (gap >= 1) {
+          tips.push('Answer the scope question in Job & Tailor (largest team, budget, launches or stakeholders you owned). It goes into your summary.');
+          tips.push(`Don't change your job title. If it undersells the work, you can add an accurate description after it, e.g. "${cvTitle} (owned X for Y)".`);
+        }
+        return { jdTitle: jt, cvTitle, jdLevel: jl, cvLevel: cl, jdLevelName: LEVEL_NAMES[jl], cvLevelName: LEVEL_NAMES[cl], gap, overlap, severity, messages, tips };
+      }
+
+      // ---- Dates & timeline -----------------------------------------------
+      function dateChecks(text) {
+        const s = parseCvStructure(prepareText(text));
+        const out = [];
+        if (!s.roles.length) {
+          out.push({ severity: 'warning', message: 'No dated roles found. ATS systems work out years of experience and gaps from ranges like "Mar 2021 – Present".', line: '' });
+          return out;
+        }
+        const all = s.roles.flatMap(r => r.ranges.map(rg => ({ ...rg, label: r.label })));
+        all.filter(r => r.end < r.start).forEach(r => out.push({ severity: 'warning', message: `The end date comes before the start date in "${truncate(r.label, 60)}".`, line: r.label }));
+        const yearOnly = s.roles.filter(r => r.ranges.some(rg => !rg.startHasMonth || (!rg.present && !rg.endHasMonth)));
+        if (yearOnly.length) {
+          out.push({ severity: 'info', line: yearOnly[0].label,
+            message: `${yearOnly.length} of ${s.roles.length} role${s.roles.length === 1 ? '' : 's'} use year-only dates. Month and year (e.g. "Mar 2022") stops screeners assuming the worst about gaps and tenure.` });
+        }
+        const kinds = new Set(all.flatMap(r => [r.startKind, r.endKind]).filter(Boolean));
+        if (kinds.size > 1) {
+          out.push({ severity: 'info', line: '', message: 'Date formats are mixed (e.g. "Mar 2022", "03/2022" and "2022"). Pick one; some parsers misread mixed formats.' });
+        }
+        const valid = all.filter(r => r.end >= r.start).sort((a, b) => a.start - b.start);
+        let cur = null;
+        valid.forEach(r => {
+          if (cur) {
+            const gap = r.start - cur.end;
+            const fuzzy = !r.startHasMonth || !(cur.endHasMonth || cur.present);
+            if (gap > 6) {
+              out.push({ severity: fuzzy ? 'info' : 'warning', line: r.label,
+                message: `${fuzzy ? 'Possibly up to' : 'About'} ${gap} months between "${truncate(cur.label, 40)}" and "${truncate(r.label, 40)}" with nothing listed. If it's real, a one-line note (study, travel, caring, freelance) stops screeners guessing.` });
+            } else if (gap < -2 && Math.min(r.end, cur.end) - r.start > 2) {
+              out.push({ severity: 'info', line: r.label,
+                message: `"${truncate(cur.label, 40)}" and "${truncate(r.label, 40)}" overlap by about ${Math.min(r.end, cur.end) - r.start} months. If they ran at the same time, say so (part-time, freelance) so it doesn't look like a date error.` });
+            }
+          }
+          if (!cur || r.end >= cur.end) cur = r;
+        });
+        const now = new Date();
+        const nowM = now.getFullYear() * 12 + now.getMonth();
+        if (cur && !cur.present && nowM - cur.end > 6) {
+          out.push({ severity: 'warning', line: cur.label,
+            message: `Your most recent role ended about ${nowM - cur.end} months ago. A short line on what you've been doing since (study, freelancing, caring, job hunting) stops screeners guessing.` });
+        }
+        return out;
+      }
+
+      function appendToSummary(text, sentence) {
+        const s = parseCvStructure(text);
+        const h = s.info.findIndex(l => l.heading && l.section === 'summary');
+        const clean = cap(String(sentence).trim().replace(/\s*\n\s*/g, ' ').replace(/[.\s]+$/, '')) + '.';
+        if (h === -1) return insertBeforeFirstSection(text, `PROFESSIONAL SUMMARY\n${clean}`);
+        const lines = s.lines.slice();
+        let last = -1;
+        for (let k = h + 1; k < lines.length; k++) {
+          if (s.info[k].heading) break;
+          if (lines[k].trim()) last = k;
+          else if (last !== -1) break;
+        }
+        if (last === -1) lines.splice(h + 1, 0, clean);
+        else lines[last] = `${lines[last].replace(/\s+$/, '')} ${clean}`;
+        return lines.join('\n');
+      }
+
+      // ---- Gap questions ------------------------------------------------
+      function buildGapQuestions(report, masterText) {
+        const qs = [];
+        const tc = report && report.titleCheck;
+        if (tc && tc.gap >= 1) {
+          qs.push({
+            id: 'scope:' + hash(tc.jdTitle.toLowerCase()), kind: 'scope', type: 'scope', requirement: `Scope for ${tc.jdTitle}`, terms: [],
+            title: `Show scope for a ${tc.jdLevelName.toLowerCase()} role`,
+            prompt: 'What is the largest scope you have actually owned? Team size, budget, number of launches or squads, the most senior stakeholders you worked with. This goes into your summary.',
+            placeholder: 'e.g. Ran release planning for 3 squads (25 engineers) and reported monthly to the VP Product'
+          });
+        }
+        const reqs = report && Array.isArray(report.requirements) ? report.requirements : [];
+        const gaps = reqs.filter(r => r.status !== 'met');
+        const picked = [...gaps.filter(r => r.type === 'required').slice(0, 7), ...gaps.filter(r => r.type !== 'required').slice(0, 3)];
+        picked.forEach(r => {
+          const eligibility = r.category === 'Eligibility' || r.status === 'unknown';
+          qs.push({
+            id: 'req:' + hash(r.requirement.toLowerCase()),
+            kind: eligibility ? 'eligibility' : 'requirement',
+            type: r.type, requirement: r.requirement, category: r.category, terms: r.terms || [], status: r.status,
+            title: r.requirement,
+            prompt: eligibility
+              ? 'Does this apply to you? Answer only if it is true, in the words you would put on your CV.'
+              : r.status === 'partial'
+                ? 'Your CV only partly shows this. What else have you actually done that proves it?'
+                : 'Have you done this? If so, where, and what exactly did you do? One or two concrete sentences.',
+            placeholder: eligibility ? 'e.g. Full right to work in the UK' : 'e.g. Built a weekly SQL report on store sales used by 12 regional managers'
+          });
+        });
+        impactBullets(masterText || '').forEach(b => qs.push({
+          id: 'impact:' + hash(squash(b)), kind: 'impact', type: 'impact', requirement: '', bulletText: b, terms: [],
+          title: 'Add a measurable result',
+          prompt: `"${b.replace(BULLET_RE, '')}" Roughly how many, how often, how much, or what changed? Estimates are fine if you could defend them in an interview.`,
+          placeholder: 'e.g. 40+ releases a year across 3 squads with no missed launch dates'
+        }));
+        return qs;
+      }
+
+      // ---- Truth check --------------------------------------------------
+      const NUM_RE = /(?<![A-Za-z0-9])(?:[£$€]\s?)?\d[\d,]*(?:\.\d+)?(?:\s?(?:%|k\b|m\b|bn\b|x\b))?\+?(?![A-Za-z0-9])/gi;
+      function numberTokens(text) {
+        return (normalize(text).match(NUM_RE) || []).map(n => n.toLowerCase().replace(/[\s,]/g, '').replace(/\+$/, '')).filter(Boolean);
+      }
+      const MULT = { k: 1e3, thousand: 1e3, m: 1e6, mm: 1e6, mn: 1e6, million: 1e6, bn: 1e9, b: 1e9, billion: 1e9 };
+      function numberValues(text) {
+        const vals = new Set();
+        const re = /(\d[\d,]*(?:\.\d+)?)\s*(%|k|mm|mn|m|bn|b|thousand|million|billion)?(?![a-z])/gi;
+        let m;
+        while ((m = re.exec(normalize(text)))) {
+          const n = parseFloat(m[1].replace(/,/g, ''));
+          if (isNaN(n)) continue;
+          const unit = (m[2] || '').toLowerCase();
+          vals.add(unit === '%' ? `${n}%` : String(+(n * (MULT[unit] || 1)).toPrecision(6)));
+        }
+        return vals;
+      }
+      function tokenValue(tok, after) {
+        const m = tok.toLowerCase().replace(/[£$€\s,+]/g, '').match(/^(\d+(?:\.\d+)?)(%|k|mm|mn|m|bn|b|x)?$/);
+        if (!m) return null;
+        const n = parseFloat(m[1]);
+        let unit = m[2] || '';
+        if (!unit) { const w = (after.match(/^\s*(thousand|million|billion)\b/i) || [])[1]; if (w) unit = w.toLowerCase(); }
+        if (unit === 'x') return null;
+        return unit === '%' ? `${n}%` : String(+(n * (MULT[unit] || 1)).toPrecision(6));
+      }
+
+      function computeTruthFlags(masterText, currentText, extraSourceText = '', limit = 30) {
+        // Compare restored versions, so re-adding lost line breaks never looks like a new claim
+        const master = prepareText(masterText || '');
+        const current = prepareText(currentText || '');
+        if (!master.trim() || !current.trim() || squash(master) === squash(current)) return [];
+        const source = `${master}\n${normalize(extraSourceText)}`;
+        // The source side is searched loosely: in text that lost its spacing, numbers and words are glued together
+        const sourceNums = new Set([...numberTokens(source), ...(normalize(source).match(/\d[\d,]*(?:\.\d+)?%?/g) || []).map(n => n.replace(/,/g, ''))]);
+        const sourceVals = numberValues(source);
+        const alnum = x => normalize(x).toLowerCase().replace(/[^a-z0-9]+/g, '');
+        const sourceAlnum = alnum(source);
+        const sourceLower = normalize(source).toLowerCase();
+        const masterLines = new Set(master.split('\n').map(l => squash(l)).filter(Boolean));
+        // Generic words that don't make a claim on their own, and vendor prefixes ("Apache Spark" vs "Spark")
+        const GENERIC = new Set(['and', 'the', 'for', 'with', 'of', 'in', 'on', 'to', 'skills', 'skill', 'management', 'methodologies',
+          'methodology', 'architecture', 'systems', 'system', 'tools', 'tool', 'languages', 'language', 'scripting', 'analysis',
+          'frameworks', 'framework', 'technologies', 'technology', 'environments', 'environment', 'operating', 'programming', 'best',
+          'practices', 'modeling', 'modelling', 'development', 'design', 'databases', 'database', 'cloud', 'enterprise', 'front', 'end',
+          'back', 'data', 'software', 'technical', 'core', 'advanced', 'strong', 'apache', 'microsoft', 'amazon', 'google', 'oracle',
+          'suite', 'platform', 'platforms', 'services', 'service', 'solutions', 'process', 'processes', 'team', 'teams', 'reporting']);
+        // Competency labels a tailor infers from described work; low risk, so not flagged
+        const SOFT = new Set(['cross-functional', 'documentation', 'stakeholder management', 'process improvement', 'onboarding', 'customer service']);
+        const wordsInSource = label => {
+          const ws = label.toLowerCase().split(/[^a-z0-9+#]+/).filter(w => w.length >= 3 && !GENERIC.has(w));
+          return !ws.length || ws.every(w => sourceAlnum.includes(alnum(w.replace(/s$/, ''))));
+        };
+        const termInSource = (term, line) => {
+          if (SOFT.has(term.label.toLowerCase())) return true;
+          if (term.taxonomy) {
+            if (findTerm(source, term).found) return true;
+            // Text with lost spacing glues words together ("usingNew Relic"), so also look for the alias loosely
+            if (term.aliases.some(a => (alnum(a).length >= 4 ? sourceAlnum.includes(alnum(a)) : a.length >= 2 && sourceLower.includes(a)))) return true;
+            return /\s/.test(term.label) && wordsInSource(term.label);
+          }
+          if (sourceAlnum.includes(alnum(term.label))) return true;
+          const words = term.label.split(/\s+/);
+          // Acronym the tailor spelled out, e.g. "User Acceptance Testing (UAT)": judge the words, not the letters
+          if (/^[A-Z][A-Z0-9&/]{1,7}$/.test(term.label)) {
+            const m = line.match(new RegExp(`((?:[A-Za-z][\\w-]*\\s+){1,8})\\(${escRe(term.label)}\\)`));
+            if (m) {
+              const exp = m[1].trim().split(/\s+/).filter(w => !/^(of|and|the|for|&|to|in)$/i.test(w));
+              const letters = term.label.replace(/[^A-Z]/g, '');
+              const tail = exp.slice(-letters.length);
+              // The spelled-out phrase must appear as a whole in the original, not just its words scattered around
+              if (tail.map(w => w[0].toUpperCase()).join('') === letters) return sourceAlnum.includes(alnum(tail.join(' ')));
+            }
+          }
+          // Expansion of an acronym that is in the original ("User Acceptance Testing" when the CV says "UAT")
+          if (words.length >= 2) {
+            const initials = words.filter(w => !/^(of|and|the|for|&|to|in)$/i.test(w)).map(w => w[0]).join('').toLowerCase();
+            if (initials.length >= 2 && new RegExp(`(^|[^a-z])${escRe(initials)}([^a-z]|$)`).test(sourceLower)) return true;
+          }
+          return wordsInSource(term.label);
+        };
+        const cvYears = Math.floor(computeCvYears(master).years + 0.0001);
+        const flags = [];
+        const seen = new Set();
+        const add = (type, value, line, message) => {
+          const key = `${type}:${value.toLowerCase()}`;
+          if (seen.has(key)) return;
+          seen.add(key);
+          flags.push({ key, type, value, line, message });
+        };
+        current.split('\n').forEach(raw => {
+          const line = raw.trim();
+          if (!line || masterLines.has(squash(line))) return;
+          const clean = line.replace(/\[[^\]]*\]/g, ' ');
+          [...clean.matchAll(NUM_RE)].forEach(mm => {
+            const tok = mm[0];
+            const t = tok.trim();
+            const norm = t.toLowerCase().replace(/[\s,]/g, '').replace(/\+$/, '');
+            if (!norm || sourceNums.has(norm)) return;
+            const after = clean.slice(mm.index + tok.length);
+            const hasUnit = /[£$€]|\d\s*(k|mm|mn|m|bn|b)\b/i.test(t) || /^\s*(thousand|million|billion)\b/i.test(after);
+            const val = hasUnit ? tokenValue(t, after) : null;
+            if (val && sourceVals.has(val)) return;
+            const n = parseFloat(norm.replace(/[^\d.]/g, ''));
+            if (!isNaN(n) && n <= cvYears && new RegExp(`${escRe(t)}\\s*\\+?\\s*(?:years?|yrs)`, 'i').test(clean)) return;
+            add('number', t.replace(/\+$/, ''), line, `New figure "${t}" is not in your master CV or your answers.`);
+          });
+          termsIn(clean).forEach(term => {
+            if (!termInSource(term, clean)) add('term', term.label, line, `"${term.label}" is new. Keep it only if you can back it up in an interview.`);
+          });
+        });
+        const curAlnum = alnum(current);
+        parseCvStructure(master).roles.forEach(r => {
+          (r.label.match(/(?:19|20)\d{2}/g) || []).forEach(y => {
+            if (!current.includes(y)) add('dropped', y, r.label, `The date "${y}" from "${truncate(r.label, 50)}" is missing.`);
+          });
+          // Employer and title sit next to the dates. In long (flattened) lines, only check the pieces right beside them.
+          const range = (r.label.match(RANGE_G) || [])[0];
+          if (!range) return;
+          const at = r.label.indexOf(range);
+          const splitSegs = x => x.split(/\s+[—–-]\s+|\s+at\s+|[|,•;()]|\.(?=\s|[A-Z])/).map(y => y.trim()).filter(Boolean);
+          const left = splitSegs(r.label.slice(0, at));
+          const right = splitSegs(r.label.slice(at + range.length));
+          const short = r.label.length <= 140;
+          const segs = short ? [...left, ...right] : [left[left.length - 1], right[0]];
+          segs
+            .filter(x => x && x.replace(/[^A-Za-z]/g, '').length >= 3 && x.split(/\s+/).length <= 6 && /[A-Z]/.test(x))
+            .forEach(seg => { if (!curAlnum.includes(alnum(seg))) add('dropped', seg, r.label, `"${seg}" from your master CV is missing.`); });
+        });
+        const email = (master.match(EMAIL_RE) || [])[0];
+        if (email && !current.includes(email)) add('dropped', email, '', `Your email "${email}" is missing.`);
+        const phone = (master.match(PHONE_RE) || [])[0];
+        if (phone && !current.replace(/\s/g, '').includes(phone.replace(/\s/g, ''))) add('dropped', phone.trim(), '', `Your phone number "${phone.trim()}" is missing.`);
+        return flags.slice(0, limit);
+      }
+
+      // ---- Truth gate: remove what the truth check can't verify, so nothing unsupported reaches the candidate unseen.
+      // List items (skills, tools) are dropped from their list; other unverified lines are removed whole.
+      // Role headers, headings and education lines are never removed: their flags stay visible for review instead.
+      function isListLine(line) {
+        const t = line.replace(BULLET_RE, '').replace(/^[^:|]{1,40}:\s*/, '');
+        const parts = t.split(/\s*[,|•;]\s*/).filter(Boolean);
+        return parts.length >= 3 && parts.every(x => x.split(/\s+/).length <= 6) && !/[.!?]\s*$/.test(t);
+      }
+      const GATE_STOP = new Set(['the', 'and', 'for', 'with', 'from', 'into', 'that', 'this', 'their', 'using', 'across', 'within', 'over', 'such']);
+      function gateTokens(x) {
+        return new Set(normalize(x).toLowerCase().replace(/[^a-z0-9+#\s]/g, ' ').split(/\s+/).filter(w => w.length >= 3 && !GATE_STOP.has(w)).map(stemWord));
+      }
+      function applyTruthGate(masterText, tailoredText, extraSourceText = '') {
+        const al = x => normalize(x).toLowerCase().replace(/[^a-z0-9]+/g, '');
+        const before = computeTruthFlags(masterText, tailoredText, extraSourceText, Infinity);
+        const bad = before.filter(f => f.type === 'term' || f.type === 'number');
+        if (!bad.length) return { text: tailoredText, removed: [], trimmed: [], reverted: [], before, flags: before };
+        const st = parseCvStructure(tailoredText);
+        // An unsupported term can appear on several lines; the check reports it once, so find every line that carries it
+        const carries = (line, f) => (f.type === 'number' ? line.includes(f.value) : al(f.value).length >= 3 && al(line).includes(al(f.value)));
+        const flagsFor = line => bad.filter(f => f.line.trim() === line.trim() || carries(line, f));
+        // Sentences of the original CV: an unverifiable rewrite falls back to the sentence it came from
+        const sourceSentences = prepareText(masterText).split(/\n|(?<=[.!?])\s+(?=[A-Z])/).map(x => x.replace(BULLET_RE, '').trim())
+          // skip list-like lines and lines carrying dates: they are not the sentence a bullet was rewritten from
+          .filter(x => x.length >= 25 && !isListLine(x) && (x.match(/,/g) || []).length < 6 && !matchRanges(x).length);
+        const sourceTok = sourceSentences.map(gateTokens);
+        const bestSource = line => {
+          const lt = gateTokens(line);
+          if (lt.size < 3) return null;
+          let best = null;
+          sourceTok.forEach((t, k) => {
+            let hit = 0; lt.forEach(w => { if (t.has(w)) hit++; });
+            const score = hit / lt.size;
+            // most of the rewrite must come from this sentence, and a fair share of the sentence must be used
+            if (score >= 0.5 && hit / Math.max(1, t.size) >= 0.35 && (!best || score > best.score)) best = { score, text: sourceSentences[k] };
+          });
+          return best && best.text;
+        };
+        const used = new Set();
+        const out = [];
+        const removed = [];
+        const trimmed = [];
+        const reverted = [];
+        let summaryDone = false;
+        st.lines.forEach((line, i) => {
+          const info = st.info[i];
+          const fs = line.trim() ? flagsFor(line) : [];
+          if (!fs.length || info.heading || matchRanges(line).length) { out.push(line); return; }
+          // An unsupported GPA or grade is taken out wherever it appears; the rest of the line stays
+          const gpaRe = /[,;|]?\s*\(?\b(?:GPA|grade point average)\b[:\s]*[\d.]+(?:\s*\/\s*[\d.]+)?\)?/i;
+          if (gpaRe.test(line) && fs.some(f => f.type === 'number' && (line.match(gpaRe) || [''])[0].includes(f.value))) {
+            const cleaned = line.replace(gpaRe, '').replace(/\s{2,}/g, ' ');
+            trimmed.push({ line: line.trim(), items: [(line.match(gpaRe) || ['GPA'])[0].replace(/^[,;|\s(]+|\)$/g, '').trim()] });
+            if (cleaned.replace(BULLET_RE, '').trim()) out.push(cleaned);
+            return;
+          }
+          if (info.section === 'education') { out.push(line); return; }
+          const skillsList = info.section === 'skills' && !/[.!?]\s*$/.test(line) && line.replace(BULLET_RE, '').split(/\s+/).length <= 14;
+          if (skillsList || isListLine(line)) {
+            const m = line.match(/^(\s*(?:[-•*▪●◦]\s*)?(?:[^:|]{1,40}:\s*)?)(.*)$/);
+            const prefix = m[1];
+            const body = m[2];
+            const sep = body.includes('|') ? '|' : body.includes('•') ? '•' : body.includes(';') ? ';' : ',';
+            const items = body.split(sep).map(x => x.trim()).filter(Boolean);
+            const unsupported = it => fs.some(f => al(it).includes(al(f.value)) || (al(it).length >= 3 && al(f.value).includes(al(it))));
+            const keep = items.filter(it => !unsupported(it));
+            const gone = items.filter(unsupported);
+            if (!gone.length) { out.push(line); return; }
+            trimmed.push({ line: line.trim(), items: gone });
+            if (keep.length) out.push(prefix + keep.join(sep === ',' ? ', ' : ` ${sep} `));
+            return;
+          }
+          const items = [...new Set(fs.map(f => f.value))];
+          const prefix = (line.match(BULLET_RE) || [''])[0];
+          const src = bestSource(line);
+          if (src && !used.has(src)) {
+            used.add(src);
+            const original = prefix + src;
+            out.push(original);
+            reverted.push({ text: line.trim(), original: original.trim(), items });
+            return;
+          }
+          if (info.section === 'summary' && !summaryDone) {
+            const factual = buildFactualSummary(prepareText(masterText), []);
+            summaryDone = true;
+            if (factual) { out.push(factual); reverted.push({ text: line.trim(), original: factual, items }); return; }
+          }
+          removed.push({ text: line.trim(), items, after: ((out.filter(l => l.trim()).pop()) || '').trim() });
+        });
+        const text = out.join('\n').replace(/\n{3,}/g, '\n\n');
+        return { text, removed, trimmed, reverted, before, flags: computeTruthFlags(masterText, text, extraSourceText, Infinity) };
+      }
+
+      // ---- Text that lost its line breaks (common with some PDF exports and job boards) ----
+      const CV_HEADINGS = ['Professional Summary', 'Executive Summary', 'Career Overview', 'Executive Profile', 'Professional Profile',
+        'Summary', 'Profile', 'Objective', 'Skill Highlights', 'Highlights', 'Core Qualifications', 'Qualifications', 'Core Competencies',
+        'Key Skills', 'Technical Skills', 'Skills', 'Professional Experience', 'Work Experience', 'Volunteer Experience', 'Work History',
+        'Employment History', 'Experience', 'Education and Training', 'Education', 'Certifications', 'Licenses', 'Accomplishments',
+        'Achievements', 'Projects', 'Languages', 'Interests', 'Additional Information', 'Affiliations', 'Publications', 'Awards'];
+      const JD_HEADINGS = ['Job Summary', 'Job Description', 'Position Summary', 'About the Role', 'About Us', 'About the Company',
+        'Key Responsibilities', 'Responsibilities', 'Essential Duties', 'Duties', 'What You Will Do', "What You'll Do",
+        'Minimum Qualifications', 'Basic Qualifications', 'Preferred Qualifications', 'Required Qualifications', 'Qualifications',
+        'Requirements', 'Required Skills', 'Preferred Skills', 'Skills', 'Education', 'Experience', 'Nice to Have', 'Benefits',
+        'Compensation', 'What We Offer', 'Who You Are', "What You'll Bring", 'What We Are Looking For', "What We're Looking For"];
+      const CAMEL_KEEP = new Set(['powerpoint', 'javascript', 'typescript', 'fintech', 'saas', 'linkedin', 'youtube', 'github', 'gitlab',
+        'quickbooks', 'hubspot', 'bigquery', 'paypal', 'devops', 'mysql', 'postgresql', 'nosql', 'sharepoint', 'onedrive', 'onenote',
+        'autocad', 'wordpress', 'netsuite', 'servicenow', 'mailchimp', 'photoshop', 'indesign', 'dynamodb', 'mongodb', 'graphql',
+        'openai', 'chatgpt', 'tiktok', 'whatsapp', 'jobsite', 'phd', 'msc', 'bsc', 'mba', 'iphone', 'ipad', 'ios', 'macos', 'ebay',
+        'jquery', 'nodejs', 'reactjs', 'vuejs', 'angularjs', 'dotnet', 'asp.net', 'vb.net', 'sqlserver', 'teamviewer', 'zendesk',
+        'freshdesk', 'docusign', 'smartsheet', 'clickup', 'airtable', 'figjam', 'solidworks', 'matlab', 'labview', 'peoplesoft']);
+      TAXONOMY.forEach(t => [t.label, ...t.aliases].forEach(a => { if (/[a-z][A-Z]/.test(a) || /[a-z][A-Z]/.test(t.label)) CAMEL_KEEP.add(a.toLowerCase().replace(/[^a-z0-9+#.]/g, '')); }));
+
+      function isFlattened(text) {
+        const t = normalize(text);
+        if (t.length < 600) return false;
+        const n = (t.match(/\n/g) || []).length + 1;
+        return t.length / n > 220;
+      }
+      function restoreStructure(text, headings) {
+        let t = normalize(text);
+        if (!isFlattened(t)) return t;
+        // Only newlines are inserted, so every resulting line is still a substring of the original text.
+        t = t.replace(/([a-z0-9%)])([.!?])(?=[A-Z][a-z])/g, '$1$2\n');
+        t = t.replace(/([a-z)])\.(?=\d)/g, '$1.\n');
+        headings.slice().sort((a, b) => b.length - a.length).forEach(h => {
+          const glued = new RegExp(`(^|[\\s.!?:;)\\]a-z0-9])(${escRe(h)})(?=[A-Z0-9(]|\\s*:)`, 'g');
+          t = t.replace(glued, (all, pre, head) => `${pre}${pre && pre !== '\n' ? '\n' : ''}${head}\n`);
+          const caps = new RegExp(`(^|\\s)(${escRe(h.toUpperCase())})(?=\\s|:|[A-Z][a-z])`, 'g');
+          t = t.replace(caps, (all, pre, head) => `${pre}${pre && pre !== '\n' ? '\n' : ''}${head}\n`);
+        });
+        t = t.replace(/\S+/g, tok => {
+          if (!/[a-z][A-Z]/.test(tok)) return tok;
+          const bare = tok.replace(/[^A-Za-z0-9+#.]/g, '').toLowerCase();
+          if (CAMEL_KEEP.has(bare)) return tok;
+          return tok.replace(/([a-z0-9%)])(?=[A-Z])/g, (m, ch, idx, str) => {
+            const leftWord = str.slice(0, idx + 1).split(/[^A-Za-z]/).pop();
+            const rightWord = (str.slice(idx + 1).match(/^[A-Za-z]+/) || [''])[0];
+            if (leftWord.length <= 2 || CAMEL_KEEP.has((leftWord + rightWord).toLowerCase())) return ch;
+            return ch + '\n';
+          });
+        });
+        return t.split('\n').map(l => l.trim()).join('\n').replace(/\n{3,}/g, '\n\n');
+      }
+      function prepareText(text) { return restoreStructure(text, CV_HEADINGS); }
+      function prepareJd(text) { return restoreStructure(text, JD_HEADINGS); }
+
+      // ---- Job fit: does this CV cover what this job asks for? ----------------------------------
+      const OVERLAP_STOP = new Set(('a about above across after again against all also am an and any are as at be because been before being ' +
+        'below between both but by can could did do does doing down during each few for from further had has have having he her here ' +
+        'hers him his how i if in into is it its itself just me more most my no nor not now of off on once only or other our ours out ' +
+        'over own same she should so some such than that the their theirs them then there these they this those through to too under ' +
+        'until up very was we were what when where which while who whom why will with would you your yours etc per via within without ' +
+        'able ability across additional apply applicant applicants based benefit benefits best candidate candidates company competitive ' +
+        'considered daily days demonstrated description desired duties employee employees employer employment environment equal etc ' +
+        'excellent experience experienced full great good help high including individual job join knowledge level like looking make ' +
+        'management manager must need needed new offer opportunity opportunities other part people per perform plus position preferred ' +
+        'proven provide provides qualified qualifications range related required requirement requirements responsibilities responsible ' +
+        'role salary seeking skill skills strong success successful support team teams time type understanding using well wide work ' +
+        'working world year years summary highlights accomplishments education company name city state current present').split(/\s+/));
+      function stemWord(w) {
+        let x = w.replace(/^[.\-]+|[.\-]+$/g, '');
+        if (x.length > 5 && x.endsWith('ies')) x = x.slice(0, -3) + 'y';
+        else if (x.length > 4 && x.endsWith('es') && /(ches|shes|sses|xes)$/.test(x)) x = x.slice(0, -2);
+        else if (x.length > 4 && x.endsWith('s') && !/(ss|us|is)$/.test(x)) x = x.slice(0, -1);
+        if (x.length > 6 && x.endsWith('ing')) x = x.slice(0, -3);
+        else if (x.length > 5 && x.endsWith('ed')) x = x.slice(0, -2);
+        return x;
+      }
+      function contentTokens(text) {
+        return normalize(text).toLowerCase().replace(/[^a-z0-9+#.\s-]/g, ' ').split(/\s+/)
+          .map(w => w.replace(/^[.\-]+|[.\-]+$/g, ''))
+          .filter(w => w.length >= 3 && !OVERLAP_STOP.has(w) && !/^\d+$/.test(w))
+          .map(stemWord)
+          .filter(w => w.length >= 3 && !OVERLAP_STOP.has(w));
+      }
+      function overlapScore(jdText, cvText) {
+        const tf = new Map();
+        contentTokens(jdText).forEach(w => tf.set(w, (tf.get(w) || 0) + 1));
+        if (!tf.size) return null;
+        const cvSet = new Set(contentTokens(cvText));
+        let num = 0; let den = 0;
+        tf.forEach((c, w) => { const wt = 1 + Math.log(c); den += wt; if (cvSet.has(w)) num += wt; });
+        return den ? num / den : null;
+      }
+      // Weights were compared on a public set of 1,759 labelled CV/job pairs (cnamuangtoun/resume-job-description-fit, test split).
+      // Simple weightings all ranked CVs within a job about equally (AUC ~0.65); this one was the most stable across halves.
+      // Scaling puts that set's 35th and 70th percentiles at 45 and 65. Absolute verdicts across different jobs were NOT
+      // supported by that data, so default verdicts are labelled as match strength, not as an interview prediction.
+      const FIT_MODEL = { wOverlap: 0.3, wKeywords: 0.5, wRequirements: 0.2, lo: -0.0945, hi: 0.407 };
+      function fitScore(jdText, cvText, requirements = [], wording = []) {
+        const jd = prepareJd(jdText);
+        const cv = prepareText(cvText);
+        const jdTerms = extractJdTerms(jd);
+        const syn = new Set((wording || []).map(g => g.label));
+        const matched = jdTerms.filter(t => findTerm(cv, t).found);
+        const exact = matched.filter(t => !syn.has(t.label)).length;
+        const keywords = jdTerms.length ? (exact + 0.5 * (matched.length - exact)) / jdTerms.length : null;
+        const req = (requirements || []).filter(r => r.type === 'required');
+        const credit = r => (r.status === 'met' ? (r.wordingGap ? 0.75 : 1) : r.status === 'partial' ? 0.5 : 0);
+        const reqCov = req.length ? req.reduce((a, r) => a + credit(r), 0) / req.length : null;
+        const overlap = overlapScore(jd, cv);
+        const parts = [[overlap, FIT_MODEL.wOverlap], [keywords, FIT_MODEL.wKeywords], [reqCov, FIT_MODEL.wRequirements]].filter(([v]) => v !== null);
+        const raw = parts.length ? parts.reduce((a, [v, w]) => a + v * w, 0) / parts.reduce((a, [, w]) => a + w, 0) : 0;
+        const score = Math.round(Math.max(0, Math.min(100, (100 * (raw - FIT_MODEL.lo)) / (FIT_MODEL.hi - FIT_MODEL.lo))));
+        return { score, raw, components: { overlap, keywords, requirements: reqCov, jdTerms: jdTerms.length, matched: matched.length } };
+      }
+
+      // ---- Export check -------------------------------------------------
+      const TEMPLATE_STRINGS = ['your.name@email.com', 'linkedin.com/in/yourprofile', 'yourprofile', '+44 7000 000000', '7000 000000',
+        'verify truthfulness', 'review & keep accurate', 'relevant domain keywords', 'role-aligned competencies', 'lorem ipsum'];
+      function findPlaceholders(text) {
+        const t = normalize(text);
+        const out = [];
+        const seen = new Set();
+        const re = /\[[^\[\]\n]{1,80}\]/g;
+        let m;
+        while ((m = re.exec(t))) {
+          if (!seen.has(m[0])) { seen.add(m[0]); out.push({ value: m[0], label: `Placeholder ${m[0]} is still in your CV.` }); }
+        }
+        const lower = t.toLowerCase();
+        TEMPLATE_STRINGS.forEach(s => {
+          const i = lower.indexOf(s);
+          if (i !== -1 && !seen.has(s)) {
+            seen.add(s);
+            const v = t.substr(i, s.length);
+            out.push({ value: v, label: `Template text "${v}" is still in your CV.` });
+          }
+        });
+        return out;
+      }
+
+      return {
+        normalize, squash, hash, findTerm, termsIn, taxonomyIn, extractJdTerms, parseCvStructure, computeCvYears, impactBullets,
+        rewritePassive, rewritePassiveInText, mergeImpact, insertBeforeFirstSection, insertAfterName, addToContactLine,
+        insertBulletUnderRole, addSkills, reorderBulletsByRelevance, buildFactualSummary, extractRequirements, buildGapQuestions,
+        computeTruthFlags, findPlaceholders, ALIAS_INDEX, wordingGaps, titleCheck, jdTitleFromText, dateChecks, appendToSummary,
+        isFlattened, prepareText, prepareJd, overlapScore, fitScore, FIT_MODEL, applyTruthGate
+      };
+    })();
+
+    // =========================================================================
+    // 6. LOCAL HEURISTIC ENGINE (OFFLINE / NO-KEY FALLBACK)
+    // =========================================================================
+    const LocalHeuristicEngine = (() => {
+      const clamp = (v, lo, hi) => Math.max(lo, Math.min(hi, v));
+
+      function screen(cvText, rawJdText, structuralWarnings) {
+        const flattened = CvIntel.isFlattened(cvText);
+        const text = CvIntel.prepareText(cvText);
+        const jdText = rawJdText ? CvIntel.prepareJd(rawJdText) : rawJdText;
+        const words = text.trim().split(/\s+/).filter(Boolean);
+        const structure = CvIntel.parseCvStructure(text);
+        const corrections = [];
+        let fixCounter = 1;
+        const nextId = () => `local-fix-${fixCounter++}`;
+        const hasJd = Boolean(jdText && jdText.trim().length > 30);
+        const jdTerms = hasJd ? CvIntel.extractJdTerms(jdText, state.jdCompany) : [];
+        const wording = hasJd ? CvIntel.wordingGaps(jdText, text) : [];
+        const synLabels = new Set(wording.map(g => g.label));
+        const dates = CvIntel.dateChecks(text);
+        const titleInfo = CvIntel.titleCheck(state.jdRoleTitle || CvIntel.jdTitleFromText(jdText || ''), text);
+
+        // 1. Structure & ATS parsing
+        let parseScore = 92;
+        if (structuralWarnings.length) parseScore -= structuralWarnings.length * 14;
+        const dateWarnings = dates.filter(d => d.severity === 'warning').length;
+        const dateInfos = dates.filter(d => d.severity !== 'warning').length;
+        parseScore -= Math.min(15, dateWarnings * 5 + dateInfos * 2);
+        const hasEmail = /[a-z0-9._%+-]+@[a-z0-9.-]+\.[a-z]{2,}/i.test(text);
+        const hasExperienceHeader = /\b(experience|employment|work history)\b/i.test(text);
+        const hasSkillsHeader = structure.info.some(l => l.heading && l.section === 'skills');
+        const hasSummary = structure.info.some(l => l.heading && l.section === 'summary') || /^\s*(professional )?(summary|profile|objective)\b/im.test(text);
+
+        if (flattened) {
+          parseScore -= 18;
+          corrections.push({
+            id: nextId(), severity: 'critical', category: 'ATS Hazard', title: 'Restore Lost Line Breaks and Section Headings',
+            reason: 'Your CV text has almost no line breaks, so headings, roles and dates run together. ATS parsers then struggle to find your sections and work history. This splits the text back into sections and lines without changing any words.',
+            actionType: 'restructure', originalText: '', suggestedText: 'Split the text into sections and lines (no words changed).'
+          });
+        }
+        if (!hasEmail) {
+          parseScore -= 15;
+          corrections.push({
+            id: nextId(), severity: 'critical', category: 'ATS Hazard', title: 'Missing Contact Email Address',
+            reason: 'ATS parsers need an email address in the main body (not in a header, footer or image) to create your candidate profile.',
+            actionType: 'prepend', originalText: '', suggestedText: '[your email] | [your phone] | [your LinkedIn URL]'
+          });
+        }
+        if (!hasSummary) {
+          parseScore -= 8;
+          const draft = CvIntel.buildFactualSummary(text, jdTerms);
+          corrections.push({
+            id: nextId(), severity: 'warning', category: 'Summary Alignment', title: 'Add a Summary Built From Your Own Facts',
+            reason: 'Screeners weight the top third of a CV heavily to classify seniority and domain. This draft uses only your title, dated experience and skills already on the page.',
+            actionType: 'prepend', originalText: '',
+            suggestedText: `PROFESSIONAL SUMMARY\n${draft || '[Your current title] with [N] years of experience in [2-3 areas you can evidence].'}`
+          });
+        }
+        if (!hasSkillsHeader) {
+          parseScore -= 10;
+          const evidenced = (jdTerms.length ? jdTerms : CvIntel.taxonomyIn(text)).filter(t => CvIntel.findTerm(text, t).found).map(t => t.label);
+          corrections.push({
+            id: nextId(), severity: 'warning', category: 'ATS Hazard', title: 'Add a Dedicated Core Skills Section',
+            reason: 'ATS taxonomies and recruiter searches index an explicit Skills section. Only skills your CV already evidences are suggested.',
+            actionType: 'append_section', originalText: '',
+            suggestedText: `CORE SKILLS\n${evidenced.length >= 3 ? evidenced.slice(0, 12).join(' | ') : '[List 8-12 skills you can back up with examples]'}`
+          });
+        }
+
+        // 2. Keyword & role alignment (whole-word matching, phrases and acronyms)
+        let matchedKeywords = [];
+        let missingKeywords = [];
+        let keywordScore = 75;
+        const requirements = hasJd ? CvIntel.extractRequirements(jdText, text) : [];
+        if (hasJd) {
+          const matched = jdTerms.filter(t => CvIntel.findTerm(text, t).found);
+          const missing = jdTerms.filter(t => !CvIntel.findTerm(text, t).found);
+          matchedKeywords = matched.map(t => t.label);
+          missingKeywords = missing.map(t => t.label).slice(0, 12);
+          // Synonym-only matches get half credit: most recruiter searches are literal
+          const exact = matched.filter(t => !synLabels.has(t.label)).length;
+          const termRatio = jdTerms.length ? (exact + 0.5 * (matched.length - exact)) / jdTerms.length : 0.5;
+          const reqd = requirements.filter(r => r.type === 'required');
+          const reqRatio = reqd.length ? reqd.filter(r => r.status === 'met').length / reqd.length : termRatio;
+          keywordScore = Math.round(clamp((termRatio * 0.5 + reqRatio * 0.5) * 105, 20, 98));
+        } else {
+          keywordScore = hasSkillsHeader && hasExperienceHeader ? 76 : 58;
+        }
+
+        // 3. Impact & quantified evidence
+        const metricMatches = text.match(/(\d+%|[$£€]\s?\d[\d,.]*\s?(?:k|m|bn)?|\b\d+\+?\s*(users|clients|customers|million|k\b|hours|days|weeks|projects|people|team members|engineers|stores|sites|countries|releases|markets))/gi) || [];
+        const impactScore = Math.min(95, 42 + metricMatches.length * 10);
+        if (metricMatches.length < 3) {
+          const bullets = CvIntel.impactBullets(text);
+          const target = bullets.find(b => !/responsible for|duties included|helped with|assisted (in|with)/i.test(b)) || bullets[0];
+          if (target) {
+            corrections.push({
+              id: nextId(), severity: 'warning', category: 'Weak Impact', title: 'Quantify Outcomes in Experience Bullets',
+              reason: 'Rankers and recruiters favour quantified impact (%, £/$, scale). Replace the bracket with a real figure, or answer the impact questions in Job & Tailor. Export warns you while brackets remain.',
+              actionType: 'replace', originalText: target.trim(),
+              suggestedText: `${target.trim().replace(/\.$/, '')}, resulting in [real figure: %, £, time saved or scale].`
+            });
+          }
+        }
+
+        // 4. Clarity, passive language & red flags
+        let clarityScore = 86;
+        const passiveHits = [...text.matchAll(/(responsible for|duties included|helped with|assisted (?:in|with))\s+[^.\n]+/gi)].slice(0, 5);
+        passiveHits.forEach(m => {
+          clarityScore -= 6;
+          const rewritten = CvIntel.rewritePassive(m[0]);
+          if (rewritten === m[0]) return;
+          corrections.push({
+            id: nextId(), severity: 'enhancement', category: 'Clarity', title: `Replace passive "${m[1].toLowerCase()}" phrasing`,
+            reason: /^(helped|assisted)/i.test(m[1])
+              ? 'Vague support verbs hide what you did. This names the work without overstating your ownership.'
+              : 'Duty phrasing signals low ownership to screeners. An active verb says what you did.',
+            actionType: 'replace', originalText: m[0], suggestedText: rewritten
+          });
+        });
+        if (words.length < 180) clarityScore -= 20;
+        else if (words.length > 1200) clarityScore -= 12;
+        if (titleInfo && (titleInfo.gap >= 2 || titleInfo.gap <= -2)) clarityScore -= 6;
+
+        parseScore = clamp(parseScore, 15, 100);
+        clarityScore = clamp(clarityScore, 20, 100);
+        const overallScore = Math.round(parseScore * 0.25 + keywordScore * 0.35 + impactScore * 0.22 + clarityScore * 0.18);
+        const verdict = overallScore < 58 ? 'LIKELY_REJECTED' : overallScore < 76 ? 'BORDERLINE' : 'PASS';
+        const summaryMap = {
+          PASS: 'Your CV parses cleanly and shows solid role signals. Review the checklist and any minor fixes below.',
+          BORDERLINE: 'Your CV is parseable but at real risk of being filtered out against stronger applicants because of keyword, requirement or impact gaps.',
+          LIKELY_REJECTED: 'High risk of automated rejection. Structure, requirement coverage or quantified evidence need attention first.'
+        };
+        const engineNote = ' (Local Heuristic Engine. Connect Gemini, ChatGPT or Claude for a deeper qualitative critique.)';
+        const toStatus = (s) => (s >= 78 ? 'strong' : s >= 58 ? 'warning' : 'critical');
+        const reqd = requirements.filter(r => r.type === 'required');
+
+        return {
+          verdict,
+          overallScore,
+          rejectionRiskSummary: `${summaryMap[verdict]}${engineNote}`,
+          localEngineNote: engineNote,
+          dimensions: [
+            { name: 'ATS Parsing & Structure', score: parseScore, status: toStatus(parseScore),
+              feedback: `${structuralWarnings.length ? `${structuralWarnings.length} structural hazard(s) detected in the file layout.` : 'Standard sections and contact details detected.'}${dates.length ? ` ${dates.length} date or timeline issue${dates.length === 1 ? '' : 's'} (see Title, Level & Dates).` : ''}` },
+            { name: 'Role & Keyword Alignment', score: keywordScore, status: toStatus(keywordScore),
+              feedback: hasJd
+                ? `Matched ${matchedKeywords.length} of ${jdTerms.length} job terms${wording.length ? ` (${wording.length} only by synonym)` : ''} and ${reqd.filter(r => r.status === 'met').length} of ${reqd.length} required items. Missing terms are never added for you: answer the gap questions in Job & Tailor if you have the experience.`
+                : 'Add a job description to unlock the must-have checklist and role-specific keyword scoring.' },
+            { name: 'Impact & Quantified Evidence', score: impactScore, status: toStatus(impactScore),
+              feedback: `Detected ${metricMatches.length} quantified result(s). Aim for 5+. The impact questions in Job & Tailor help you add real numbers.` },
+            { name: 'Clarity, Tone & Red Flags', score: clarityScore, status: toStatus(clarityScore),
+              feedback: `Word count: ${words.length}. ${passiveHits.length ? `${passiveHits.length} passive duty phrase(s) found.` : clarityScore < 80 ? 'Consider length and phrasing.' : 'Clear, concise tone.'}${titleInfo && titleInfo.gap >= 2 ? ' Seniority gap to the target role (see Title, Level & Dates).' : ''}` }
+          ],
+          matchedKeywords,
+          missingKeywords,
+          requirements,
+          corrections
+        };
+      }
+
+      function tailor(rawBaseText, rawJdText, answers = [], requirements = []) {
+        const notes = [];
+        const baseText = CvIntel.prepareText(rawBaseText);
+        const jdText = CvIntel.prepareJd(rawJdText);
+        if (CvIntel.isFlattened(rawBaseText)) notes.push('Restored line breaks and section headings that were lost when the text was extracted (no words changed).');
+        const jdTerms = CvIntel.extractJdTerms(jdText, state.jdCompany);
+        const has = a => !a.skipped && a.text && a.text.trim();
+
+        // 1. Merge confirmed impact into the matching bullets
+        const lines = CvIntel.normalize(baseText).trim().split('\n');
+        let impactCount = 0;
+        answers.filter(a => a.kind === 'impact' && has(a) && a.bulletText).forEach(a => {
+          const idx = lines.findIndex(l => l.trim() === a.bulletText.trim());
+          if (idx === -1) return;
+          lines[idx] = CvIntel.mergeImpact(lines[idx], a.text);
+          impactCount++;
+        });
+        let text = lines.join('\n');
+        if (impactCount) notes.push(`Added your ${impactCount} confirmed result${impactCount === 1 ? '' : 's'} to the matching bullet${impactCount === 1 ? '' : 's'}.`);
+
+        // 2. Confirmed requirement evidence becomes bullets under the chosen role, plus skills
+        const skillLabels = [];
+        let evidenceCount = 0;
+        answers.filter(a => a.kind === 'requirement' && has(a)).forEach(a => {
+          const fromAnswer = CvIntel.termsIn(a.text).filter(t => t.taxonomy).map(t => t.label);
+          const single = Array.isArray(a.terms) && a.terms.length === 1 ? a.terms : [];
+          skillLabels.push(...single, ...fromAnswer);
+          if (a.roleLabel && a.roleLabel !== '__skills__') {
+            const res = CvIntel.insertBulletUnderRole(text, a.roleLabel, a.text);
+            if (res.ok) { text = res.text; evidenceCount++; }
+          }
+        });
+        if (evidenceCount) notes.push(`Added ${evidenceCount} bullet${evidenceCount === 1 ? '' : 's'} from your gap answers under the roles you chose.`);
+
+        answers.filter(a => a.kind === 'eligibility' && has(a)).forEach(a => {
+          text = CvIntel.addToContactLine(text, a.text.trim().replace(/[.\s]+$/, ''));
+          notes.push(`Added "${a.text.trim()}" to your contact line so eligibility filters can see it.`);
+        });
+
+        // 3. Active verbs, without inflating ownership
+        const passive = CvIntel.rewritePassiveInText(text);
+        text = passive.text;
+        if (passive.changed) notes.push(`Rewrote ${passive.changed} passive duty phrase${passive.changed === 1 ? '' : 's'} with active verbs ("Helped with" became "Contributed to", not "Led").`);
+
+        // 4. Skills you confirmed
+        if (skillLabels.length) {
+          const r = CvIntel.addSkills(text, skillLabels);
+          text = r.text;
+          if (r.added.length) notes.push(`Added ${r.added.join(', ')} to your skills because you confirmed real experience.`);
+        }
+
+        // 5. Most relevant bullets first
+        const ro = CvIntel.reorderBulletsByRelevance(text, jdTerms);
+        text = ro.text;
+        if (ro.rolesChanged) notes.push(`Reordered bullets in ${ro.rolesChanged} role${ro.rolesChanged === 1 ? '' : 's'} so the most job-relevant ones come first.`);
+
+        // 6. Factual summary
+        const struct = CvIntel.parseCvStructure(text);
+        const hasSummary = struct.info.some(l => l.heading && l.section === 'summary');
+        if (!hasSummary) {
+          const s = CvIntel.buildFactualSummary(text, jdTerms);
+          if (s) {
+            text = CvIntel.insertBeforeFirstSection(text, `PROFESSIONAL SUMMARY\n${s}`);
+            notes.push('Added a one-line summary built only from your title, dates and evidenced skills.');
+          }
+        }
+
+        // 6b. Confirmed scope strengthens the summary
+        answers.filter(a => a.kind === 'scope' && has(a)).forEach(a => {
+          text = CvIntel.appendToSummary(text, a.text);
+          notes.push('Added the scope you confirmed to your summary, so the seniority gap is backed by facts.');
+        });
+
+        // 7. Report what was deliberately left out
+        const open = requirements.filter(r => r.type === 'required' && r.status !== 'met' &&
+          !answers.some(a => a.requirement === r.requirement && has(a)));
+        if (open.length) {
+          notes.push(`${open.length} required item${open.length === 1 ? '' : 's'} still lack evidence (${open.slice(0, 4).map(r => r.requirement).join(', ')}${open.length > 4 ? '…' : ''}). They were left out rather than claimed.`);
+        }
+        if (!notes.length) notes.push('No safe changes found. Answer the gap questions to give the tailor more to work with.');
+        return { tailoredCvText: text, tailoringNotes: notes };
+      }
+
+      return { screen, tailor };
+    })();
+
+// ---- CSV parsing --------------------------------------------------------------
+function parseCsv(text) {
+  const rows = []; let row = []; let field = ''; let q = false;
+  for (let i = 0; i < text.length; i++) {
+    const c = text[i];
+    if (q) {
+      if (c === '"') { if (text[i + 1] === '"') { field += '"'; i++; } else q = false; }
+      else field += c;
+    } else if (c === '"') q = true;
+    else if (c === ',') { row.push(field); field = ''; }
+    else if (c === '\n' || c === '\r') {
+      if (c === '\r' && text[i + 1] === '\n') i++;
+      row.push(field); field = ''; if (row.length > 1 || row[0]) rows.push(row); row = [];
+    } else field += c;
+  }
+  if (field || row.length) { row.push(field); rows.push(row); }
+  const head = rows.shift().map(h => h.trim());
+  return rows.map(r => Object.fromEntries(head.map((h, i) => [h, r[i] || ''])));
+}
+
+// ---- Seeded sampling ----------------------------------------------------------
+function mulberry32(a) { return () => { a |= 0; a = (a + 0x6D2B79F5) | 0; let t = Math.imul(a ^ (a >>> 15), 1 | a); t = (t + Math.imul(t ^ (t >>> 7), 61 | t)) ^ t; return ((t ^ (t >>> 14)) >>> 0) / 4294967296; }; }
+function samplePairs(data, n, seed, labels = ['No Fit', 'Potential Fit']) {
+  const rnd = mulberry32(seed);
+  const pool = data.filter(r => labels.includes(r.label));
+  for (let i = pool.length - 1; i > 0; i--) { const j = Math.floor(rnd() * (i + 1)); [pool[i], pool[j]] = [pool[j], pool[i]]; }
+  const perJob = new Map(); const want = { [labels[0]]: Math.ceil(n / 2), [labels[1]]: Math.floor(n / 2) }; const got = { [labels[0]]: 0, [labels[1]]: 0 };
+  const out = [];
+  for (const r of pool) {
+    if (out.length >= n) break;
+    const k = r.job_description_text; const c = perJob.get(k) || 0;
+    if (c >= 3 || got[r.label] >= want[r.label]) continue;
+    perJob.set(k, c + 1); got[r.label]++; out.push(r);
+  }
+  return out;
+}
+
+// ---- Provider calls -----------------------------------------------------------
+function extractJson(raw) {
+  if (!raw) throw new Error('Empty response');
+  const t = raw.trim();
+  try { return JSON.parse(t); } catch {}
+  const m = t.match(/```(?:json)?\s*([\s\S]*?)```/i) || t.match(/(\{[\s\S]*\})/);
+  if (m) return JSON.parse(m[1].trim());
+  throw new Error('Unexpected format');
+}
+// Models that reject the temperature setting (remembered per provider and model)
+const noTemperature = new Set();
+// Settings are copied when a run starts, so editing the form mid-run can't change the provider or key in use
+let runCfg = null;
+async function callModel(system, user, { maxTokens = 400, temperature = 0, raw = false } = {}, cfg = runCfg.judge) {
+  const id = `${cfg.provider}:${cfg.model}`;
+  const sentTemperature = !noTemperature.has(id);
+  try {
+    return await callModelOnce(system, user, { maxTokens, temperature: sentTemperature ? temperature : undefined, raw }, cfg);
+  } catch (err) {
+    if (sentTemperature && /temperature/i.test(err.message || '')) {
+      if (!noTemperature.has(id)) log(`${cfg.model} rejects the temperature setting; retrying without it.`);
+      noTemperature.add(id);
+      return callModelOnce(system, user, { maxTokens, temperature: undefined, raw }, cfg);
+    }
+    throw err;
+  }
+}
+async function withRetry(fn, tries = 2) {
+  for (let i = 0; ; i++) {
+    try { return await fn(); } catch (err) {
+      if (i + 1 >= tries || !/format|empty|cut off|json/i.test(err.message || '')) throw err;
+    }
+  }
+}
+async function callModelOnce(system, user, { maxTokens = 400, temperature, raw = false } = {}, cfg = runCfg.judge) {
+  const { provider, model, key } = cfg;
+  let url; let opts;
+  if (provider === 'claude') {
+    url = 'https://api.anthropic.com/v1/messages';
+    opts = { method: 'POST', headers: { 'Content-Type': 'application/json', 'x-api-key': key, 'anthropic-version': '2023-06-01', 'anthropic-dangerous-direct-browser-access': 'true' },
+      body: JSON.stringify({ model, max_tokens: maxTokens, temperature, system: raw ? system : system + '\n\nRespond with ONLY valid JSON.', messages: [{ role: 'user', content: user }] }) };
+  } else if (provider === 'openai') {
+    url = 'https://api.openai.com/v1/chat/completions';
+    opts = { method: 'POST', headers: { 'Content-Type': 'application/json', Authorization: `Bearer ${key}` },
+      body: JSON.stringify({ model, temperature, max_completion_tokens: maxTokens, ...(raw ? {} : { response_format: { type: 'json_object' } }), messages: [{ role: 'system', content: system }, { role: 'user', content: user }] }) };
+  } else {
+    url = `https://generativelanguage.googleapis.com/v1beta/models/${model}:generateContent?key=${encodeURIComponent(key)}`;
+    opts = { method: 'POST', headers: { 'Content-Type': 'application/json' },
+      body: JSON.stringify({ systemInstruction: { parts: [{ text: system }] }, contents: [{ parts: [{ text: user }] }], generationConfig: { ...(raw ? {} : { responseMimeType: 'application/json' }), temperature } }) };
+  }
+  let delay = 1500;
+  for (let attempt = 0; attempt < 5; attempt++) {
+    if (stopFlag) throw new Error('Stopped');
+    const res = await fetch(url, opts);
+    if (res.ok) {
+      const d = await res.json();
+      usage.in += d.usage?.input_tokens || d.usage?.prompt_tokens || d.usageMetadata?.promptTokenCount || 0;
+      usage.out += d.usage?.output_tokens || d.usage?.completion_tokens || d.usageMetadata?.candidatesTokenCount || 0;
+      const text = provider === 'claude' ? d.content?.find(c => c.type === 'text')?.text
+        : provider === 'openai' ? d.choices?.[0]?.message?.content : d.candidates?.[0]?.content?.parts?.[0]?.text;
+      const stop = d.stop_reason || d.choices?.[0]?.finish_reason || d.candidates?.[0]?.finishReason || '';
+      if (!text) throw new Error(`Empty response (stop reason: ${stop || 'unknown'})`);
+      if (/max_tokens|length|MAX_TOKENS/.test(stop)) throw new Error('Response cut off at the token limit');
+      return raw ? text : extractJson(text);
+    }
+    if ((res.status === 429 || res.status >= 500) && attempt < 4) {
+      const ra = parseFloat(res.headers.get('retry-after')); await new Promise(r => setTimeout(r, ra ? ra * 1000 : delay)); delay *= 2; continue;
+    }
+    let msg = `HTTP ${res.status}`; try { const j = await res.json(); msg = j.error?.message || j.message || msg; } catch {}
+    throw new Error(msg);
+  }
+}
+
+const JUDGE_SYSTEM = `You are an experienced recruiter screening applications for the job below. Decide whether this candidate should advance to a recruiter phone screen, based only on the CV and the job description. Be realistic and consistent: most applicants are not advanced. Ignore formatting quirks that do not affect the content.
+Return ONLY JSON: {"advance": true or false, "score": 0-100 (how strongly the CV matches the job), "reason": "one short sentence"}`;
+async function judge(cv, jd) {
+  const r = await withRetry(() => callModel(JUDGE_SYSTEM, `JOB DESCRIPTION:\n"""\n${jd.slice(0, 12000)}\n"""\n\nCANDIDATE CV:\n"""\n${cv.slice(0, 16000)}\n"""`, { maxTokens: 300 }));
+  return { advance: r.advance === true || r.advance === 'true', score: Math.max(0, Math.min(100, Number(r.score) || 0)), reason: String(r.reason || '') };
+}
+
+// ---- Tailoring (same code as the app) ------------------------------------------
+const CONTACT = 'Alex Example\nalex@example.com | 07700 900000\n';
+function localTailor(cv, jd) {
+  const reqs = CvIntel.extractRequirements(jd, cv);
+  let t = LocalHeuristicEngine.tailor(cv, jd, [], reqs).tailoredCvText;
+  const gaps = CvIntel.wordingGaps(jd, t);
+  if (gaps.length) t = CvIntel.addSkills(t, gaps.slice(0, 4).map(g => g.jdPhrase.charAt(0).toUpperCase() + g.jdPhrase.slice(1)), true).text;
+  return t;
+}
+async function aiTailor(cv, jd) {
+  const notEvidenced = CvIntel.extractRequirements(jd, cv).filter(r => r.status !== 'met').map(r => r.requirement);
+  const { systemPrompt, userPrompt } = buildTailoringPrompts(cv, jd, [], notEvidenced);
+  // The CV comes back between tags, not inside JSON, so long multi-line text can't break the format
+  return withRetry(async () => {
+    const text = await callModel(toTaggedTailoringPrompt(systemPrompt), userPrompt, { maxTokens: 16000, temperature: 0.3, raw: true }, runCfg.tailor);
+    const m = text.match(/<tailored_cv>\s*([\s\S]*?)\s*<\/tailored_cv>/i);
+    if (!m) throw new Error(/<tailored_cv>/i.test(text) ? 'Tailored CV cut off' : 'Unexpected format (no <tailored_cv> tags)');
+    return m[1];
+  });
+}
+
+// ---- Stats --------------------------------------------------------------------
+function binomTwoSided(k, n) {
+  if (!n) return 1;
+  const lf = x => { let s = 0; for (let i = 2; i <= x; i++) s += Math.log(i); return s; };
+  const pmf = i => Math.exp(lf(n) - lf(i) - lf(n - i) - n * Math.LN2);
+  const pk = pmf(k); let p = 0;
+  for (let i = 0; i <= n; i++) { const q = pmf(i); if (q <= pk + 1e-12) p += q; }
+  return Math.min(1, p);
+}
+function meanCi(xs) {
+  const n = xs.length; if (!n) return { m: 0, lo: 0, hi: 0 };
+  const m = xs.reduce((a, b) => a + b, 0) / n;
+  const sd = Math.sqrt(xs.reduce((a, b) => a + (b - m) ** 2, 0) / Math.max(1, n - 1));
+  const h = 1.96 * sd / Math.sqrt(n); return { m, lo: m - h, hi: m + h };
+}
+
+// ---- Runner -------------------------------------------------------------------
+let data = []; let results = []; let stopFlag = false; let failures = []; let fatalError = ''; const usage = { in: 0, out: 0 };
+const $ = id => document.getElementById(id);
+const log = msg => { const el = $('log'); el.textContent += msg + '\n'; el.scrollTop = el.scrollHeight; };
+const MODEL_DEFAULTS = { claude: 'claude-haiku-5-5', openai: 'gpt-5.4-mini', gemini: 'gemini-3.8-flash' };
+
+function updateEstimate() {
+  const n = Math.min(Number($('n').value) || 0, 400);
+  const ai = $('aiTailor').checked;
+  const calls = n * (ai ? 4 + ($('judgeRaw').checked ? 1 : 0) : 2);
+  const tokens = Math.round(n * (ai ? 4 : 2) * 2300 + (ai ? n * 2500 : 0));
+  $('estimate').textContent = `About ${calls} API calls and ~${(tokens / 1e6).toFixed(2)}M input tokens. A small model (Haiku, GPT-4o mini, Gemini Flash) keeps this cheap; check your provider's pricing.`;
+  $('run').disabled = !data.length;
+}
+$('provider').addEventListener('change', e => { $('model').value = MODEL_DEFAULTS[e.target.value]; });
+$('tProvider').addEventListener('change', e => { $('tModel').value = e.target.value === 'same' ? '' : MODEL_DEFAULTS[e.target.value]; });
+$('aiTailor').addEventListener('change', e => { $('tailorCfg').style.display = e.target.checked ? 'grid' : 'none'; $('rawRow').style.display = e.target.checked ? 'flex' : 'none'; updateEstimate(); });
+$('judgeRaw').addEventListener('change', updateEstimate);
+let running = false;
+window.addEventListener('beforeunload', e => { if (running) { e.preventDefault(); e.returnValue = ''; } });
+function lockSettings(locked) {
+  document.querySelectorAll('#settings input, #settings select, #file').forEach(el => { el.disabled = locked; });
+}
+['n', 'aiTailor'].forEach(id => $(id).addEventListener('input', updateEstimate));
+$('file').addEventListener('change', async e => {
+  const f = e.target.files[0]; if (!f) return;
+  data = parseCsv(await f.text()).filter(r => r.resume_text && r.job_description_text && r.label);
+  const counts = data.reduce((a, r) => ((a[r.label] = (a[r.label] || 0) + 1), a), {});
+  $('fileInfo').textContent = `Loaded ${data.length} pairs: ${Object.entries(counts).map(([k, v]) => `${v} ${k}`).join(', ')}.`;
+  updateEstimate();
+});
+$('stop').addEventListener('click', () => { stopFlag = true; $('status').textContent = 'Stopping after current requests…'; });
+
+$('run').addEventListener('click', async () => {
+  if (!$('key').value.trim()) { $('status').textContent = 'Add the judge API key first.'; return; }
+  const judgeCfg = { provider: $('provider').value, model: $('model').value.trim(), key: $('key').value.trim() };
+  const sameTailor = $('tProvider').value === 'same';
+  runCfg = {
+    judgeRaw: $('aiTailor').checked && $('judgeRaw').checked,
+    judge: judgeCfg,
+    tailor: sameTailor ? { ...judgeCfg, model: $('tModel').value.trim() || judgeCfg.model }
+      : { provider: $('tProvider').value, model: $('tModel').value.trim() || MODEL_DEFAULTS[$('tProvider').value], key: $('tKey').value.trim() || judgeCfg.key }
+  };
+  const n = Math.min(Number($('n').value) || 100, 400);
+  const sampleLabels = $('sampleMode').value === 'weak' ? ['No Fit', 'Potential Fit'] : ['Potential Fit', 'Good Fit'];
+  const pairs = samplePairs(data, n, Number($('seed').value) || 42, sampleLabels);
+  const ai = $('aiTailor').checked;
+  results = []; stopFlag = false; failures = []; fatalError = ''; noTemperature.clear(); usage.in = usage.out = 0; $('log').textContent = '';
+  $('run').disabled = true; $('stop').disabled = false; $('resultsCard').style.display = 'none';
+  running = true; lockSettings(true);
+  log(`Testing ${pairs.length} pairs. Judge: ${runCfg.judge.provider} / ${runCfg.judge.model}${ai ? `. AI tailoring: ${runCfg.tailor.provider} / ${runCfg.tailor.model}` : ''}`);
+  const rnd = mulberry32((Number($('seed').value) || 42) + 7);
+  let done = 0; let next = 0;
+  const conc = Math.max(1, Math.min(6, Number($('conc').value) || 3));
+  async function work() {
+    while (next < pairs.length && !stopFlag) {
+      const i = next++; const p = pairs[i];
+      const original = CONTACT + p.resume_text; const jd = p.job_description_text;
+      const row = { idx: i, label: p.label, judge_model: runCfg.judge.model, tailor_model: ai ? runCfg.tailor.model : '' };
+      let step = 'tailoring';
+      try {
+        const versions = { original, local: localTailor(original, jd) };
+        const fl = CvIntel.computeTruthFlags(original, versions.local);
+        row.flags_local = fl.length;
+        row.flag_details_local = fl.slice(0, 12).map(f => `${f.type}: ${f.value}`).join(' | ');
+        if (ai) {
+          step = 'AI tailoring';
+          try {
+            const rawAi = await aiTailor(original, jd);
+            // Same truth gate as the app: unverified additions are removed before the judge sees the CV
+            const gate = CvIntel.applyTruthGate(original, rawAi);
+            row.flags_ai_before_gate = gate.before.length;
+            row.flag_details_ai_before_gate = gate.before.slice(0, 15).map(f => `${f.type}: ${f.value}`).join(' | ');
+            row.gate_removed_lines = gate.removed.length;
+            row.gate_reverted_lines = gate.reverted.length;
+            row.gate_removed_items = gate.trimmed.reduce((a, x) => a + x.items.length, 0);
+            row.gate_removed_detail = [...gate.reverted.map(x => `REVERTED: ${x.text} => ${x.original}`), ...gate.removed.map(x => `REMOVED: ${x.text}`), ...gate.trimmed.map(x => `ITEMS: ${x.items.join(', ')}`)].join(' || ').slice(0, 4000);
+            versions.ai = gate.text;
+            if (runCfg.judgeRaw) versions.ai_raw = rawAi;
+            row.flags_ai = gate.flags.length;
+            row.flag_details_ai = gate.flags.slice(0, 12).map(f => `${f.type}: ${f.value}`).join(' | ');
+            row.ai_cv = gate.text;
+            row.ai_raw_cv = rawAi;
+          } catch (err) {
+            // Keep the pair for the offline comparison; just record that AI tailoring failed
+            if (err.message === 'Stopped' || /401|403|invalid.*key|api key|credit|quota|rate limit/i.test(err.message)) throw err;
+            row.ai_error = err.message;
+            log(`pair ${i} (AI tailoring): ${err.message}`);
+          }
+        }
+        step = 'judging';
+        const order = Object.keys(versions).sort(() => rnd() - 0.5);
+        for (const v of order) { const j = await judge(versions[v], jd); row[`${v}_adv`] = j.advance; row[`${v}_score`] = j.score; row[`${v}_reason`] = j.reason; }
+        results.push(row);
+      } catch (err) {
+        if (err.message !== 'Stopped') {
+          log(`pair ${i} (${step}): ${err.message}`);
+          failures.push(err.message);
+          // Stop early if nothing has worked and the same error keeps coming back
+          const sameError = failures.length >= 3 && failures.slice(-3).every(m => m === failures[failures.length - 1]);
+          if ((!results.length && sameError) || /401|403|invalid.*key|api key/i.test(err.message)) {
+            stopFlag = true;
+            fatalError = err.message;
+            log(`Stopping: every request is failing with "${err.message}".`);
+          }
+        }
+      }
+      done++; $('progress').style.width = `${(100 * done) / pairs.length}%`;
+      $('status').textContent = `${done}/${pairs.length} pairs · ${usage.in.toLocaleString()} input / ${usage.out.toLocaleString()} output tokens`;
+    }
+  }
+  await Promise.all(Array.from({ length: conc }, work));
+  running = false; lockSettings(false);
+  $('run').disabled = false; $('stop').disabled = true;
+  log(`Finished: ${results.length} pairs judged.`);
+  renderResults(ai);
+});
+
+function renderResults(ai) {
+  if (!results.length) {
+    $('results').innerHTML = `<div class="verdict"><span class="pill badp">No pairs judged</span><p>${escapeHtml(fatalError || failures[0] || 'The run was stopped before any pair finished.')}</p><p class="muted">Check the API key, the model name and your provider's usage limits, then run again.</p></div>`;
+    $('resultsCard').style.display = 'block';
+    return;
+  }
+  const rows = [];
+  const verdictText = [];
+  const cond = ai ? ['local', 'ai', ...(results.some(r => typeof r.ai_raw_score === 'number') ? ['ai_raw'] : [])] : ['local'];
+  const name = { original: 'Original CV', local: 'App tailoring (offline)', ai: 'AI tailoring + truth gate', ai_raw: 'AI tailoring, before the gate' };
+  const has = v => results.filter(r => typeof r[`${v}_score`] === 'number');
+  const adv = v => has(v).filter(r => r[`${v}_adv`]).length;
+  rows.push(`<tr><th>Version</th><th>Advanced to screen</th><th>Mean match score</th><th>CVs with truth flags</th></tr>`);
+  ['original', ...cond].forEach(v => {
+    const n = has(v).length;
+    const flagKey = v === 'ai_raw' ? 'flags_ai_before_gate' : `flags_${v}`;
+    const flags = v === 'original' ? '&ndash;' : `${has(v).filter(r => r[flagKey] > 0).length}/${n}`;
+    rows.push(`<tr><td>${name[v]}</td><td>${adv(v)}/${n} (${n ? Math.round((100 * adv(v)) / n) : 0}%)</td><td>${n ? (has(v).reduce((a, r) => a + r[`${v}_score`], 0) / n).toFixed(1) : '&ndash;'}</td><td>${flags}</td></tr>`);
+  });
+  if (ai) {
+    const gated = results.filter(r => typeof r.gate_removed_lines === 'number');
+    const lines = gated.reduce((a, r) => a + r.gate_removed_lines, 0);
+    const rev = gated.reduce((a, r) => a + (r.gate_reverted_lines || 0), 0);
+    const items = gated.reduce((a, r) => a + r.gate_removed_items, 0);
+    const touched = gated.filter(r => r.gate_removed_lines || r.gate_removed_items || r.gate_reverted_lines).length;
+    rows.push(`<tr><td colspan="4" class="muted">Truth gate, before judging: restored the original wording on ${rev} line(s), removed ${lines} line(s) and ${items} list item(s), across ${touched} of ${gated.length} AI-tailored CVs. Flags left after the gate are mostly on role headers and category labels, which it leaves for review.</td></tr>`);
+    const failedAi = results.filter(r => r.ai_error).length;
+    if (failedAi) rows.push(`<tr><td colspan="4" class="muted">AI tailoring failed on ${failedAi} pair(s); those are left out of the AI comparison only.</td></tr>`);
+  }
+  cond.forEach(v => {
+    const both = has(v);
+    const up = both.filter(r => !r.original_adv && r[`${v}_adv`]).length;
+    const down = both.filter(r => r.original_adv && !r[`${v}_adv`]).length;
+    const p = binomTwoSided(Math.min(up, down), up + down);
+    const ci = meanCi(both.map(r => r[`${v}_score`] - r.original_score));
+    const sig = p < 0.05 && up > down;
+    const cls = sig ? 'good' : up < down && p < 0.05 ? 'badp' : 'warn';
+    verdictText.push(`<div class="verdict" style="margin-top:10px"><span class="pill ${cls}">${name[v]}</span>
+      <p><strong>${up}</strong> CVs went from not advanced to advanced, <strong>${down}</strong> went the other way (paired test p = ${p.toFixed(3)}).
+      Match score changed by <strong>${ci.m >= 0 ? '+' : ''}${ci.m.toFixed(1)}</strong> points on average (95% CI ${ci.lo.toFixed(1)} to ${ci.hi.toFixed(1)}).</p>
+      <p class="muted">${sig ? 'The independent judge advanced tailored CVs more often, and the difference is unlikely to be chance.' : up > down ? 'Tailored CVs did a little better, but the difference could be chance at this sample size.' : 'No evidence that tailoring helped with this judge and sample.'}
+      ${['No Fit', 'Potential Fit', 'Good Fit'].map(l => { const g = both.filter(r => r.label === l); return g.length ? ` ${l}: ${g.filter(r => r.original_adv).length}→${g.filter(r => r[`${v}_adv`]).length} advanced of ${g.length}.` : ''; }).join('')}</p></div>`);
+  });
+  $('results').innerHTML = `<table>${rows.join('')}</table>${verdictText.join('')}
+    <p class="muted" style="margin-top:10px">This is an AI judge, not a hiring outcome. It shows whether a separate model reading both versions blind prefers the tailored one. The dataset's fit labels have no documented source. Truth flags count tailored CVs containing a figure, skill or tool that is not in the original; for offline tailoring this should be zero.</p>`;
+  $('resultsCard').style.display = 'block';
+}
+
+$('download').addEventListener('click', () => {
+  const keys = [...new Set(results.flatMap(r => Object.keys(r)))];
+  const esc = v => `"${String(v === undefined ? '' : v).replace(/"/g, '""')}"`;
+  const csv = [keys.join(','), ...results.map(r => keys.map(k => esc(r[k])).join(','))].join('\n');
+  const a = document.createElement('a'); a.href = URL.createObjectURL(new Blob([csv], { type: 'text/csv' })); a.download = 'screenguard_benchmark_results.csv'; a.click();
+});
+updateEstimate();
+</script>
+</body>
+</html>
