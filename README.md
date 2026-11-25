@@ -1,8 +1,10 @@
 # ScreenGuard CV
 
-ScreenGuard CV checks a CV against a job advert before you apply. It shows how well you match the job, which requirements your CV doesn't yet prove, and whether hiring software is likely to read the file properly. It can also tailor the CV to the job, but it won't let anything untrue into it.
+##ScreenGuard came out of working with some young people on how quickly their CV's where getting rejected by AI screening software when they were submitting an application for a job. ScreenGuard CV checks a CV against a job advert before application, and itt shows how well you match the job, which requirements your CV doesn't yet prove, and whether hiring software is likely to read the file properly. It can also tailor the CV to the job (but it won't let anything untrue into it).
 
-It's a single web page that runs in your browser. There's nothing to install and no account to create.
+As with a lot of the Apps I create, it's a single web page that runs in the browser. There's nothing to install and no account to create and you can access it at:
+
+
 
 ## What it does
 
