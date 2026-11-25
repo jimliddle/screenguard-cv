@@ -6,7 +6,7 @@ It's a single web page that runs in your browser. There's nothing to install and
 
 ## What it does
 
-- **Checks the file.** Flags scanned or picture-only PDFs, two-column layouts, Word tables, images, missing contact details and text that has lost its line breaks. A CV that hiring software can't read is never seen by a person.
+- **Checks the file.** Flags scanned or picture only PDFs, two column layouts, Word tables, images, missing contact details and text that has lost its line breaks. A CV that hiring software can't read is never seen by a person.
 - **Scores your match with the job (Job Fit).** Picks out the job's hard requirements, such as years of experience, a degree, tools, the right to work and location, and shows the line of your CV that proves each one. It also points out where your CV uses different words from the job advert, since recruiters usually search for the advert's exact terms.
 - **Scores the CV itself (CV Readiness).** Looks at layout, whether your results have numbers behind them, and clear writing. This is kept separate from Job Fit.
 - **Checks seniority and dates.** Compares your latest job title with the role, and looks for gaps of more than 6 months, overlapping jobs and dates without months.
@@ -43,21 +43,21 @@ Your CV, job adverts, answers and Tracker stay in your browser's storage. They'r
 
 API keys are saved in the browser too. They're encrypted, but the key needed to read them is stored in the same place, so this only stops someone casually looking. On a shared computer, choose **Session only** in AI Settings and click **Clear Data** when you've finished.
 
-## What we've tested
+## What I've tested
 
-We tested the scoring and the tailoring on public data. The results are modest, and the app's own help page says so.
+I tested the scoring and the tailoring on public data. The results are fairly modest.
 
-**Job Fit.** We scored 1,759 pairs of CVs and job adverts that someone had labelled as a good, possible or poor match. Take two CVs for the same job, one labelled good and one poor: Job Fit scored the good one higher about two times in three. A coin toss would manage one in two. It didn't work well for comparing scores across different jobs, so by default the app says Strong, Partial or Weak match rather than predicting an interview. The dataset doesn't say who labelled it or how, so treat these results as rough.
+**Job Fit.** It scored 1,759 pairs of CVs and job adverts that someone had labelled as a good, possible or poor match. Take two CVs for the same job, one labelled good and one poor: Job Fit scored the good one higher about two times in three. A coin toss would manage one in two. It didn't work well for comparing scores across different jobs, so by default the app says Strong, Partial or Weak match rather than predicting an interview. The dataset doesn't say who labelled it or how, so treat these results as rough.
 
-**Tailoring.** We took 100 CVs that were close to matching their job. Claude Haiku tailored them and GPT-5.4 mini judged them, without knowing which version was which. Honest AI tailoring raised the judge's match score by about 1.5 points out of 100 and made almost no difference to how many CVs were put through to a phone screen: 8 before tailoring and 9 after. The app's offline tailoring made no difference.
+**Tailoring.** It took 100 CVs that were close to matching their job. Claude Haiku tailored them and GPT-5.4 mini judged them, without knowing which version was which. Honest AI tailoring raised the judge's match score by about 1.5 points out of 100 and made almost no difference to how many CVs were put through to a phone screen: 8 before tailoring and 9 after. The app's offline tailoring made no difference.
 
 An earlier version without the truth check did better in a similar test, but about one tailored CV in ten included a skill, qualification or figure the person didn't have. A stricter prompt now cuts those additions by about 80%, and the truth check removes the rest. On the earlier results it removed every invented item we had found by hand and kept 96% of the content.
 
-In practice, rewording a CV won't get you through on its own. Applying for jobs you match, meeting the must-haves and adding real experience matter more. The gap questions are the part we expect to help most, and they can only be tested with real applications, which is why the Tracker exists.
+In practice, rewording a CV won't get you through an AI screener on its own. Applying for jobs you match, meeting the must haves and adding real experience matter the most when combatting AI screeners. The gap questions are the part I expect to help most in the App.
 
 ## The benchmark
 
-`benchmark.html` reruns the tailoring test with your own API keys.
+`benchmark.html` You can rerun the tailoring test with your own API keys.
 
 1. Download `test.csv` from the [resume-job-description-fit dataset](https://huggingface.co/datasets/cnamuangtoun/resume-job-description-fit) on Hugging Face (Files and versions tab) and choose it on the page. The file is only read in your browser.
 2. Choose a judge provider, model and key. To test AI tailoring, tick **Also test AI tailoring** and pick a different provider for tailoring, so a model isn't marking its own work.
@@ -67,12 +67,12 @@ Each pair is judged twice (three times with AI tailoring), in random order, agai
 
 ## Limits
 
-ScreenGuard can't see an employer's own screening questions (such as visa sponsorship, location or salary), whether a job is already meant for someone, or how many people have applied. Some things no CV can fix: in a well-known study, identical CVs got different numbers of callbacks depending only on the name at the top. ScreenGuard can help you avoid rejections you can prevent and focus on jobs where you stand a chance. It can't promise an interview.
+ScreenGuard can't see an employer's own screening questions (such as visa sponsorship, location or salary), whether a job is already meant for someone, or how many people have applied, so there are some things no CV changes can fix. As an example, in a well known study, identical CVs got different numbers of callbacks depending only on the name at the top! ScreenGuard can help you avoid rejections you can prevent and focus on jobs where you stand a chance, but it cannot of course guarantee an interview.
 
 ## Data and credits
 
 - The labelled CV and job pairs come from [cnamuangtoun/resume-job-description-fit](https://huggingface.co/datasets/cnamuangtoun/resume-job-description-fit). No licence is stated for that dataset, so it isn't included here.
-- The callback study is Bertrand and Mullainathan (2004), "Are Emily and Greg More Employable than Lakisha and Jamal?". We used the version published in the [OpenIntro](https://github.com/OpenIntroStat/openintro) R package.
+- The callback study is Bertrand and Mullainathan (2004), "Are Emily and Greg More Employable than Lakisha and Jamal?". I used the version published in the [OpenIntro](https://github.com/OpenIntroStat/openintro) R package.
 - The app uses [Tailwind CSS](https://tailwindcss.com), [Lucide](https://lucide.dev) icons, [PDF.js](https://mozilla.github.io/pdf.js/) and [Mammoth](https://github.com/mwilliamson/mammoth.js), loaded from public CDNs.
 
 ## Licence
